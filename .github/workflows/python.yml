@@ -1,0 +1,123 @@
+name: python
+
+# Test matrix, plugin manifest validation and the slow uv launcher test (SPEC 14.2).
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.10", "3.12"]
+        include:
+          # the launcher's detach/browser logic is macOS/Linux sensitive
+          - os: macos-latest
+            python-version: "3.12"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest -q
+
+  manifests:
+    name: validate manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Validate JSON, hook registration and versions
+        run: |
+          python - <<'PY'
+          import json, re, sys
+          sys.path.insert(0, ".")
+          from cc_mission_control import __version__
+
+          errors = []
+          docs = {}
+          for p in ("hooks/hooks.json", ".claude-plugin/plugin.json",
+                    ".claude-plugin/marketplace.json", "examples/project-settings.json"):
+              try:
+                  with open(p, encoding="utf-8") as f:
+                      docs[p] = json.load(f)
+              except Exception as e:
+                  errors.append(f"{p}: {e}")
+
+          EVENTS = {
+              "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+              "PostToolUseFailure", "SubagentStart", "SubagentStop", "Stop", "StopFailure",
+              "Notification", "PreCompact", "PostCompact", "TaskCreated", "TaskCompleted",
+              "SessionEnd",
+          }
+          URL = "http://127.0.0.1:4317/hook"
+
+          hooks = docs.get("hooks/hooks.json", {}).get("hooks", {})
+          if set(hooks) != EVENTS:
+              errors.append(f"hooks.json events differ: missing={sorted(EVENTS - set(hooks))} extra={sorted(set(hooks) - EVENTS)}")
+          for event, groups in hooks.items():
+              entries = [h for g in groups for h in g.get("hooks", [])]
+              if len(entries) != 1:
+                  errors.append(f"{event}: expected exactly 1 hook, found {len(entries)}")
+                  continue
+              h = entries[0]
+              if event == "SessionStart":
+                  if h.get("type") != "command":
+                      errors.append("SessionStart must be a command hook")
+              elif h.get("type") != "http" or h.get("url") != URL or h.get("timeout") != 2:
+                  errors.append(f"{event}: expected http hook to {URL} with timeout 2, got {h}")
+
+          pyproject = open("pyproject.toml", encoding="utf-8").read()
+          m = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M)
+          py_version = m.group(1) if m else None
+          plugin_version = docs.get(".claude-plugin/plugin.json", {}).get("version")
+          if not (plugin_version == py_version == __version__):
+              errors.append(f"version mismatch: plugin.json={plugin_version} pyproject={py_version} __version__={__version__}")
+
+          if errors:
+              for e in errors:
+                  print(f"::error::{e}")
+              sys.exit(1)
+          print(f"OK: 4 JSON files parse, 15 hook events, version {__version__}")
+          PY
+
+  launcher-uv:
+    name: launcher uv integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+
+      - name: Run slow launcher test
+        env:
+          CCMC_SLOW_TESTS: "1"
+        run: uv run --extra dev pytest -q tests/test_launcher.py

@@ -1,0 +1,64 @@
+name: ui-bundle
+
+# Verifies the committed dashboard bundle matches a fresh build of ui/ (SPEC 14.1).
+
+on:
+  push:
+    paths:
+      - "ui/**"
+      - "cc_mission_control/static/**"
+      - ".github/workflows/ui-bundle.yml"
+  pull_request:
+    paths:
+      - "ui/**"
+      - "cc_mission_control/static/**"
+      - ".github/workflows/ui-bundle.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: ui/.nvmrc
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ui
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: ui
+        run: npm run typecheck
+
+      - name: Test
+        working-directory: ui
+        run: npm test
+
+      - name: Build
+        working-directory: ui
+        run: npm run build
+
+      - name: Check committed bundle is up to date
+        run: |
+          # porcelain output covers modified, deleted and untracked files
+          status="$(git status --porcelain -- cc_mission_control/static)"
+          if [ -n "$status" ]; then
+            echo "$status"
+            git diff --stat -- cc_mission_control/static
+            echo "::error::Run \`npm run build\` in ui/ and commit the bundle"
+            exit 1
+          fi
+          echo "Committed bundle matches the fresh build."
