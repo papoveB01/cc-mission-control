@@ -57,7 +57,7 @@ Teams that need to govern agent behavior (security review, audit, cost control) 
 | 4 | Frontend | React + TypeScript (Vite), prebuilt bundle committed to the repo |
 | 5 | Repo visibility | Public |
 | 6 | License | Elastic License 2.0 (licensor: E&EL Global Inc.) |
-| 7 | Name | `cc-mission-control`, repo `papoveB01/cc-mission-control-beta` until v0.1.0, then renamed to `papoveB01/cc-mission-control` (GitHub redirects the old URL; update all references in one commit) |
+| 7 | Name | `cc-mission-control`, repo `papoveB01/cc-mission-control`. The repo was built as `papoveB01/cc-mission-control-beta` and renamed at v0.1.0 (GitHub redirects the old URL); all references were updated in one commit |
 
 # 3. Scope
 
@@ -226,8 +226,8 @@ cc-mission-control/
   "version": "0.1.0",
   "description": "Live dashboard for Claude Code sessions: agents, subagents, context usage, and tool calls in real time.",
   "author": { "name": "Papove Bombando Mfuana", "url": "https://github.com/papoveB01" },
-  "homepage": "https://github.com/papoveB01/cc-mission-control-beta",
-  "repository": "https://github.com/papoveB01/cc-mission-control-beta",
+  "homepage": "https://github.com/papoveB01/cc-mission-control",
+  "repository": "https://github.com/papoveB01/cc-mission-control",
   "license": "Elastic-2.0",
   "keywords": ["observability", "dashboard", "subagents", "hooks", "agent-governance"]
 }
@@ -295,7 +295,7 @@ Committed to `.claude/settings.json` on any project branch that should carry the
 {
   "extraKnownMarketplaces": {
     "papoveb01": {
-      "source": { "source": "github", "repo": "papoveB01/cc-mission-control-beta" }
+      "source": { "source": "github", "repo": "papoveB01/cc-mission-control" }
     }
   },
   "enabledPlugins": {
@@ -309,7 +309,7 @@ Committed to `.claude/settings.json` on any project branch that should carry the
 **Known issue.** Several open Claude Code issues report that project-level `extraKnownMarketplaces` + `enabledPlugins` does not prompt installation in some versions. The README must therefore also give the manual path, which always works:
 
 ```
-/plugin marketplace add papoveB01/cc-mission-control-beta
+/plugin marketplace add papoveB01/cc-mission-control
 /plugin install cc-mission-control@papoveb01
 ```
 
@@ -693,7 +693,7 @@ Reference: `https://code.claude.com/docs/en/hooks`
 
 **0.1.1 (2 October 2026)**, after checking against the hooks and settings references and real Claude Code 2.1.287 transcripts:
 
-- Build repo is `papoveB01/cc-mission-control-beta` until v0.1.0.
+- The build repo was `papoveB01/cc-mission-control-beta` until v0.1.0, when it was renamed to `papoveB01/cc-mission-control` (historical mention).
 - `PostToolUse` / `PostToolUseFailure` supply `duration_ms`; failures use `error` and `is_interrupt`.
 - Subagents link to their spawn call through `subagents/agent-<id>.meta.json` first, pending-list FIFO second; `agent_id` prefix normalized.
 - Context formula includes `output_tokens`; 1M window inferred from observed usage; `SessionStart.context_tokens` seeds the gauge on resume.

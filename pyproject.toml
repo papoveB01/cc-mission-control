@@ -25,7 +25,7 @@ dev = ["pytest>=8"]
 ccmc-server = "cc_mission_control.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/papoveB01/cc-mission-control-beta"
+Homepage = "https://github.com/papoveB01/cc-mission-control"
 
 [tool.hatch.build.targets.wheel]
 packages = ["cc_mission_control"]
