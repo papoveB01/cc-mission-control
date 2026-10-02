@@ -362,6 +362,89 @@ def test_claim_browser_concurrent_exactly_one_wins(tmp_path):
     assert results.count(True) == 1 and len(results) == 5
 
 
+def _restart_setup(inproc, monkeypatch, tmp_path, marker, reconnect_after):
+    """Server 'just started' with clients == 0; later health calls show a client after N polls."""
+    data = tmp_path / "data"
+    data.mkdir(exist_ok=True)
+    if marker:
+        (data / "browser.opened").write_text("x")
+    calls = {"n": 0, "sleeps": 0}
+
+    def fake_health(port, timeout=0.5):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "down", None
+        clients = 1 if reconnect_after is not None and calls["n"] - 1 > reconnect_after else 0
+        return "ours", {"app": "cc-mission-control", "clients": clients}
+
+    monkeypatch.setattr(launch, "health", fake_health)
+    monkeypatch.setattr(launch, "start_server", lambda cfg: type("P", (), {"poll": lambda self: None})())
+    monkeypatch.setattr(launch, "wait_healthy", lambda port, proc, deadline: {"app": "cc-mission-control", "clients": 0})
+    monkeypatch.setattr(launch, "POLL_SECONDS", 0.01)
+    monkeypatch.setattr(launch, "RECONNECT_WAIT_SECONDS", 0.3)
+    real_sleep = time.sleep
+
+    def counting_sleep(sec):
+        calls["sleeps"] += 1
+        real_sleep(sec)
+
+    monkeypatch.setattr(launch.time, "sleep", counting_sleep)
+    return calls
+
+
+def test_restart_recent_marker_client_reconnects_no_open(inproc, monkeypatch, tmp_path):
+    calls = _restart_setup(inproc, monkeypatch, tmp_path, marker=True, reconnect_after=2)
+    assert launch.main() == 0
+    assert inproc["open"] == [] and inproc["post"]
+    assert calls["sleeps"] >= 1
+
+
+def test_restart_recent_marker_no_reconnect_opens(inproc, monkeypatch, tmp_path):
+    calls = _restart_setup(inproc, monkeypatch, tmp_path, marker=True, reconnect_after=None)
+    t0 = time.monotonic()
+    assert launch.main() == 0
+    assert len(inproc["open"]) == 1
+    assert calls["sleeps"] >= 1 and time.monotonic() - t0 >= 0.25
+    assert (tmp_path / "data" / "browser.opened").exists()
+
+
+def test_restart_no_marker_opens_immediately(inproc, monkeypatch, tmp_path):
+    calls = _restart_setup(inproc, monkeypatch, tmp_path, marker=False, reconnect_after=None)
+    assert launch.main() == 0
+    assert len(inproc["open"]) == 1 and calls["sleeps"] == 0
+    assert (tmp_path / "data" / "browser.opened").exists()  # marker is created when we open
+
+
+def test_after_idle_shutdown_marker_removed_decides_immediately(inproc, monkeypatch, tmp_path):
+    # the server deletes browser.opened when it shuts down with no clients, so the next start sees no marker
+    marker = tmp_path / "data" / "browser.opened"
+    marker.parent.mkdir(exist_ok=True)
+    marker.write_text("x")
+    marker.unlink()
+    calls = _restart_setup(inproc, monkeypatch, tmp_path, marker=False, reconnect_after=None)
+    assert launch.main() == 0
+    assert len(inproc["open"]) == 1 and calls["sleeps"] == 0
+
+
+def test_restart_stale_marker_does_not_wait(inproc, monkeypatch, tmp_path):
+    calls = _restart_setup(inproc, monkeypatch, tmp_path, marker=True, reconnect_after=None)
+    old = time.time() - 13 * 3600
+    os.utime(tmp_path / "data" / "browser.opened", (old, old))
+    assert launch.main() == 0
+    assert len(inproc["open"]) == 1 and calls["sleeps"] == 0
+
+
+def test_already_running_does_not_wait(inproc, monkeypatch, tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "browser.opened").write_text("x")
+    monkeypatch.setattr(launch, "health", lambda port, timeout=0.5: ("ours", {"app": "cc-mission-control", "clients": 0}))
+    slept = []
+    monkeypatch.setattr(launch.time, "sleep", lambda s: slept.append(s))
+    assert launch.main() == 0
+    assert slept == [] and len(inproc["open"]) == 1
+
+
 def test_stamp_written_before_open(inproc, monkeypatch, tmp_path):
     monkeypatch.setattr(launch, "health", lambda port, timeout=0.5: ("ours", dict(BROWSER_OK)))
     stamp = tmp_path / "data" / "browser.lock"

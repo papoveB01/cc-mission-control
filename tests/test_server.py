@@ -627,3 +627,34 @@ def test_second_instance_leaves_pid_file(tmp_path):
             _stop(second)
         _stop(first)
     assert not (tmp_path / "server.pid").exists()
+
+
+def test_idle_shutdown_removes_opened_marker(make, clock, tmp_path):
+    marker = tmp_path / "browser.opened"
+    marker.write_text("x")
+    app = make(idle_minutes=1)
+    calls = shutdown_flag(app)
+    app.state.housekeeping_tick()
+    clock.advance(30)
+    app.state.housekeeping_tick()
+    assert marker.exists() and calls == []  # not idle long enough yet
+    clock.advance(31)
+    app.state.housekeeping_tick()
+    assert calls == [1] and not marker.exists()
+
+
+def test_idle_shutdown_without_marker_is_fine(make, clock):
+    app = make(idle_minutes=1)
+    calls = shutdown_flag(app)
+    app.state.housekeeping_tick()
+    clock.advance(61)
+    app.state.housekeeping_tick()
+    assert calls == [1]
+
+
+def test_lifespan_shutdown_keeps_opened_marker(make, tmp_path):
+    marker = tmp_path / "browser.opened"
+    marker.write_text("x")
+    with TestClient(make(), base_url=BASE) as c:
+        assert_empty_200(post(c, ev("SessionStart")))
+    assert marker.exists()

@@ -267,6 +267,9 @@ def create_app(
                 state.idle_since = now
             elif config.idle_minutes > 0 and now - state.idle_since >= config.idle_minutes * 60:
                 log.info("idle for %d minutes; shutting down", config.idle_minutes)
+                # no tab can reconnect after an idle stop: tell the launcher not to wait for one
+                with contextlib.suppress(OSError):
+                    (config.data_dir / "browser.opened").unlink()
                 state.request_shutdown()
         except Exception:
             log.exception("housekeeping tick failed")

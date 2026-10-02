@@ -22,6 +22,8 @@ APP_ID = "cc-mission-control"
 BUDGET_SECONDS = 18.0
 WATCHDOG_SECONDS = 17.0  # hard stop, under the 20 s hook timeout; CCMC_LAUNCH_DEADLINE overrides
 HEALTH_DEADLINE_SECONDS = 1.0
+RECONNECT_WAIT_SECONDS = 6.0  # after a restart, let an already-open tab reconnect before opening another
+OPENED_MARKER_MAX_AGE = 12 * 3600
 LOG_MAX_BYTES = 5 * 1024 * 1024
 START_WAIT_SECONDS = 15.0
 POLL_SECONDS = 0.25
@@ -203,16 +205,46 @@ def claim_browser(data_dir: Path) -> bool:
         return True  # can't debounce; better one tab than none
 
 
-def should_open_browser(health_data: dict, event: dict, data_dir: Path, env=None) -> bool:
-    """All conditions of SPEC 8.1 step 6. Claims the debounce lock when it returns True."""
+def browser_allowed(event: dict, env=None) -> bool:
+    """The environment and event-source conditions (everything except clients and the lock)."""
     env = os.environ if env is None else env
-    if health_data.get("clients") != 0:
-        return False
     if env.get("CCMC_NO_BROWSER", "").strip() == "1" or env.get("CLAUDE_CODE_REMOTE", "").strip() == "true":
         return False
-    if event.get("source") not in (None, "startup", "resume"):
+    return event.get("source") in (None, "startup", "resume")
+
+
+def should_open_browser(health_data: dict, event: dict, data_dir: Path, env=None) -> bool:
+    """All conditions of SPEC 8.1 step 6. Claims the debounce lock when it returns True."""
+    if health_data.get("clients") != 0 or not browser_allowed(event, env):
         return False
     return claim_browser(data_dir)
+
+
+def opened_recently(data_dir: Path) -> bool:
+    try:
+        return time.time() - (Path(data_dir) / "browser.opened").stat().st_mtime < OPENED_MARKER_MAX_AGE
+    except OSError:
+        return False
+
+
+def touch_opened(data_dir: Path) -> None:
+    try:
+        (Path(data_dir) / "browser.opened").touch()
+    except OSError:
+        pass
+
+
+def wait_for_client(port: int, data: dict, deadline: float) -> dict:
+    """Poll /health until a dashboard connects; returns the latest health (or `data` if none arrived)."""
+    end = min(time.monotonic() + RECONNECT_WAIT_SECONDS, deadline)
+    while time.monotonic() + POLL_SECONDS <= end:
+        time.sleep(POLL_SECONDS)
+        state, latest = health(port)
+        if state == "ours":
+            data = latest
+            if data.get("clients") != 0:
+                break
+    return data
 
 
 def open_browser(url: str) -> None:
@@ -264,6 +296,7 @@ def main() -> int:
         cfg = settings()
         port = cfg["port"]
         state, data = health(port)
+        just_started = False
         if state == "foreign":
             log(f"port {port} is used by another service; not starting the server "
                 "(set CCMC_PORT and update hooks.json to use a different port)")
@@ -280,9 +313,15 @@ def main() -> int:
                 if isinstance(event, dict) and proc.poll() is None and time.monotonic() < started + BUDGET_SECONDS - 1.5:
                     post_event(port, event)
                 return 0
+            just_started = True
         if isinstance(event, dict):
             post_event(port, event)
-        if should_open_browser(data, event if isinstance(event, dict) else {}, cfg["data_dir"]):
+        ev = event if isinstance(event, dict) else {}
+        if (just_started and data.get("clients") == 0 and browser_allowed(ev)
+                and opened_recently(cfg["data_dir"])):
+            data = wait_for_client(port, data, started + BUDGET_SECONDS - 2)
+        if should_open_browser(data, ev, cfg["data_dir"]):
+            touch_opened(cfg["data_dir"])
             open_browser(f"http://127.0.0.1:{port}/")
     except BaseException as exc:  # noqa: BLE001
         try:
