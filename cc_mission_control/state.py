@@ -24,6 +24,10 @@ CWD_CHARS = 1000
 DEFAULT_SUBAGENT = "general-purpose"
 AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 LINK_CAP = 256
+NOTIFY_TAG = "<task-notification>"
+TASK_ID_RE = re.compile(r"<task-id>\s*([^<]*?)\s*</task-id>")
+TOOL_ID_RE = re.compile(r"<tool-use-id>\s*([^<]*?)\s*</tool-use-id>")
+UNREPORTED = "No result reported (blocked or cancelled)"
 STDERR_MARK = "\n[stderr]\n"
 LANE_CALLS = 60
 ACTIVITY_MAX = 80
@@ -52,6 +56,8 @@ class Call:
     input: Any = field(default_factory=dict)
     output: str = ""
     error: Optional[str] = None
+    synthetic: bool = False  # closed by us, not by a Post event
+    counted: bool = False  # the synthetic close incremented agent.errors
 
     def to_dict(self, detail: bool = False) -> dict:
         d: Dict[str, Any] = {
@@ -148,6 +154,7 @@ class Session:
     activity: Deque[dict] = field(default_factory=lambda: deque(maxlen=ACTIVITY_MAX))
     pending: List[dict] = field(default_factory=list)
     spawns: Dict[str, dict] = field(default_factory=dict)
+    stopped: Dict[str, float] = field(default_factory=dict)
     spawn_links: Dict[str, str] = field(default_factory=dict)
     spawn_models: Dict[str, str] = field(default_factory=dict)
 
@@ -423,19 +430,26 @@ class Store:
     def _new_agent(self, agent_id: str, label: str, now: float, agent_type: Optional[str] = None) -> Agent:
         return Agent(id=agent_id, label=label, started=now, max_calls=self.config.max_calls, agent_type=agent_type)
 
-    def _agent(self, s: Session, agent_id: str, now: float, agent_type: Any = None) -> Agent:
+    def _agent(
+        self, s: Session, agent_id: str, now: float, agent_type: Any = None, revive: bool = False
+    ) -> Agent:
+        """Get or create a lane. Only revive=True events bring a finished lane back to running."""
         agent_type = self._ident(agent_type)
         agent = s.agents.get(agent_id)
         if agent is None:
             agent = self._new_agent(agent_id, agent_type or "Subagent", now, agent_type)
-            agent.status = "running"
+            stopped_at = s.stopped.pop(agent_id, None)
+            if stopped_at is None:
+                agent.status = "running"
+            else:
+                agent.status, agent.ended = "done", stopped_at
             s.agents[agent_id] = agent
         elif agent_id != MAIN:
             if agent_type and not agent.agent_type:
                 agent.agent_type = agent_type
                 if agent.label == "Subagent":
                     agent.label = agent_type
-            if agent.status == "done":
+            if revive and agent.status == "done":
                 agent.status, agent.ended = "running", None
         return agent
 
@@ -576,6 +590,7 @@ class Store:
             for c in a.calls:
                 if c.status == "running":
                     c.status, c.ended, c.error = "error", now, "Session ended"
+                    c.synthetic, c.counted = True, False
                     c.duration_ms = max(0, int((now - c.started) * 1000))
             if a.id == MAIN:
                 a.status = "idle"
@@ -603,12 +618,39 @@ class Store:
     def _h_prompt(self, s: Session, e: dict, aid: str, now: float) -> None:
         main = s.agents[MAIN]
         prompt = e.get("prompt")
-        main.task = self.redactor.text(prompt) if isinstance(prompt, str) else main.task
         main.status = "running"
+        if isinstance(prompt, str) and prompt.lstrip().startswith(NOTIFY_TAG):
+            lane = self._notified_lane(s, prompt)
+            text = f"{lane.label} result delivered to Main" if lane else "Background task notification"
+            self._act(s, now, MAIN, "agent", text, "ok")
+            return
+        main.task = self.redactor.text(prompt) if isinstance(prompt, str) else main.task
         self._act(s, now, MAIN, "prompt", main.task, "info")
 
+    def _notified_lane(self, s: Session, prompt: str) -> Optional[Agent]:
+        m = TASK_ID_RE.search(prompt)
+        raw = m.group(1) if m else ""
+        sub_id = raw[len("agent-"):] if raw.startswith("agent-") else raw
+        lane = s.agents.get(sub_id) if AGENT_ID_RE.match(sub_id) and sub_id != MAIN else None
+        if lane is None:
+            m = TOOL_ID_RE.search(prompt)
+            tool_id = m.group(1) if m else ""
+            lane = next((a for a in s.agents.values() if tool_id and a.spawn_call_id == tool_id), None)
+        return lane
+
+    def _close_unreported(self, s: Session, agent: Agent, now: float) -> None:
+        """Calls still running when their agent finishes were blocked or cancelled: no Post will come."""
+        for c in agent.calls:
+            if c.status != "running":
+                continue
+            c.status, c.ended, c.error = "error", now, UNREPORTED
+            c.duration_ms = max(0, int((now - c.started) * 1000))
+            c.synthetic = c.counted = True
+            agent.errors += 1
+            self._act(s, now, agent.id, "error", f"{c.tool} blocked or cancelled", "error")
+
     def _h_pre_tool(self, s: Session, e: dict, aid: str, now: float) -> None:
-        agent = self._agent(s, aid, now, e.get("agent_type"))
+        agent = self._agent(s, aid, now, e.get("agent_type"), revive=True)
         if aid == MAIN and agent.status in ("waiting", "idle", "error"):
             agent.status = "running"
         existing = self._find_call(s, self._ident(e.get("tool_use_id")) or "")
@@ -634,6 +676,11 @@ class Store:
         agent = self._agent(s, aid, now, e.get("agent_type"))
         call = self._match(s, agent, e, now)
         self._finish(call, e, now, "ok")
+        if call.synthetic:  # a real result arrived after we gave up on it
+            owner = s.agents.get(call.agent_id, agent)
+            if call.counted:
+                owner.errors = max(0, owner.errors - 1)
+            call.error, call.synthetic, call.counted = None, False, False
         resp = e.get("tool_response")
         call.output = self._output(resp)
         if call.tool in SPAWN_TOOLS and isinstance(resp, dict):
@@ -672,23 +719,48 @@ class Store:
         self._finish(call, e, now, "error")
         err = e.get("error")
         call.error = self.redactor.text(err if isinstance(err, str) else _dumps(err) if err else "")
-        agent.errors += 1
-        if call.tool in SPAWN_TOOLS and call.subagent_id is None:
-            s.pending = [p for p in s.pending if p["tool_use_id"] != call.id]
-            s.spawns.pop(call.id, None)
-        if call.tool in SPAWN_TOOLS:
-            self._drop_links(s, call.id)
+        self._count_error(s, agent, call)
+        self._drop_spawn(s, call)
         if e.get("is_interrupt") is True:
             text = f"{call.tool} interrupted"
         else:
             text = f"{call.tool} failed: {_first_line(call.error)}"
         self._act(s, now, aid, "error", text, "error")
 
+    def _count_error(self, s: Session, agent: Agent, call: Call) -> None:
+        """Count a real failure once, even if a synthetic close already counted it."""
+        owner = s.agents.get(call.agent_id, agent)
+        if not (call.synthetic and call.counted):
+            owner.errors += 1
+        call.synthetic = call.counted = False
+
+    def _drop_spawn(self, s: Session, call: Call) -> None:
+        """A spawn call that failed or was denied will never get a lane."""
+        if call.tool not in SPAWN_TOOLS:
+            return
+        if call.subagent_id is None:
+            s.pending = [p for p in s.pending if p["tool_use_id"] != call.id]
+            s.spawns.pop(call.id, None)
+        self._drop_links(s, call.id)
+
+    def _h_permission_denied(self, s: Session, e: dict, aid: str, now: float) -> None:
+        agent = self._agent(s, aid, now, e.get("agent_type"))
+        call = self._match(s, agent, e, now)
+        self._finish(call, e, now, "error")
+        reason = e.get("reason")
+        reason = self.redactor.text(reason) if isinstance(reason, str) and reason.strip() else ""
+        call.error = f"Denied: {reason}" if reason else "Denied"
+        self._count_error(s, agent, call)
+        self._drop_spawn(s, call)
+        self._act(s, now, aid, "error", f"{call.tool} denied", "error")
+
     def _h_subagent_start(self, s: Session, e: dict, aid: str, now: float) -> None:
         if aid == MAIN:
             return
-        agent = self._agent(s, aid, now, e.get("agent_type"))
-        agent.status = "running"
+        fresh_done = aid not in s.agents and aid in s.stopped
+        agent = self._agent(s, aid, now, e.get("agent_type"), revive=True)
+        if not fresh_done:
+            agent.status = "running"
         agent.transcript_path = _str(e.get("agent_transcript_path")) or agent.transcript_path
         linked = s.spawn_links.pop(agent.id, None)
         model = s.spawn_models.pop(agent.id, None)
@@ -704,8 +776,16 @@ class Store:
     def _h_subagent_stop(self, s: Session, e: dict, aid: str, now: float) -> None:
         if aid == MAIN:
             return
+        if aid not in s.agents:
+            kind = self._ident(e.get("agent_type"))
+            s.stopped[aid] = now
+            while len(s.stopped) > LINK_CAP:
+                del s.stopped[next(iter(s.stopped))]
+            self._act(s, now, MAIN, "agent", f"{kind} finished" if kind else "Background agent finished", "ok")
+            return
         agent = self._agent(s, aid, now, e.get("agent_type"))
         agent.status, agent.ended = "done", now
+        self._close_unreported(s, agent, now)
         msg = e.get("last_assistant_message")
         if isinstance(msg, str):
             agent.result = self.redactor.text(msg)
@@ -714,10 +794,12 @@ class Store:
 
     def _h_stop(self, s: Session, e: dict, aid: str, now: float) -> None:
         s.agents[MAIN].status = "idle"
+        self._close_unreported(s, s.agents[MAIN], now)
         self._act(s, now, MAIN, "turn", "Turn finished", "ok")
 
     def _h_stop_failure(self, s: Session, e: dict, aid: str, now: float) -> None:
         s.agents[MAIN].status = "error"
+        self._close_unreported(s, s.agents[MAIN], now)
         parts = []
         for key in ("error", "error_details"):
             v = e.get(key)
@@ -763,6 +845,7 @@ _HANDLERS: Dict[str, Callable[..., None]] = {
     "PreToolUse": Store._h_pre_tool,
     "PostToolUse": Store._h_post_tool,
     "PostToolUseFailure": Store._h_tool_failure,
+    "PermissionDenied": Store._h_permission_denied,
     "SubagentStart": Store._h_subagent_start,
     "SubagentStop": Store._h_subagent_stop,
     "Stop": Store._h_stop,

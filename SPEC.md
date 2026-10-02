@@ -141,6 +141,7 @@ All hooks receive common fields: `session_id`, `transcript_path`, `cwd`, `hook_e
 | `PreCompact` / `PostCompact` | http | Activity entries; compaction counter |
 | `TaskCreated` / `TaskCompleted` | http | Activity entries |
 | `SessionEnd` | http | Session ended; close running calls |
+| `PermissionDenied` | http | Auto-mode denial: call → error "Denied" |
 
 **Subagent spawns.** The tool that launches a subagent is named `Agent` (older versions: `Task`). `SubagentStart` carries no link to the spawning call, so linking works in this order:
 
@@ -277,7 +278,7 @@ The plugin reference is therefore `cc-mission-control@papoveb01`.
 }
 ```
 
-The comments above are for this document only; the real file is plain JSON with all fifteen events written out.
+The comments above are for this document only; the real file is plain JSON with all sixteen events written out (the fifteen above plus `PermissionDenied`, added in 0.1.1).
 
 Rules:
 
@@ -436,6 +437,10 @@ Activity {
 **Output summary rule.** From `tool_response`, use the first non-empty of: `stdout`, `output`, `content`, `result`, `text`, `message`. Fallback: JSON. Then redact and truncate to `CCMC_MAX_FIELD_CHARS`.
 
 **Call matching.** Match Post events to Pre by `tool_use_id`. If absent, match the most recent running call with the same `tool_name` on that agent. If no match, create the call then complete it.
+
+**Unreported calls.** A call blocked before execution (e.g. the path sandbox) fires `PreToolUse` but never a Post event. On `Stop`/`StopFailure`, still-running main-lane calls close as error "No result reported (blocked or cancelled)"; `SubagentStop` does the same for that lane. Hooks are separate HTTP requests, so a late Post for such a call is still applied and the error count corrected.
+
+**Background notifications.** With background subagents, Claude Code delivers results as a `UserPromptSubmit` whose prompt starts with `<task-notification>`. These do not replace the main task; they log "<lane> result delivered to Main".
 
 **Status transitions (main agent).** `UserPromptSubmit` → running; `Notification` (permission/idle/needs-input) → waiting; next `PreToolUse` → running; `Stop` → idle; `StopFailure` → error. `SessionEnd` closes running calls as error and marks subagents done.
 
@@ -696,5 +701,6 @@ Reference: `https://code.claude.com/docs/en/hooks`
 - Stale-session rule (`CCMC_STALE_MINUTES`), dev-only `CCMC_DEV_ORIGINS`, nested redaction, static bundle in the wheel, Node 22 pinned.
 - README notes workspace trust for project-level plugin config.
 - Subagents link first through the documented `Agent` `tool_response.agentId` (async_launched/completed), then the meta file, then FIFO.
+- From real-session acceptance (Claude Code 2.1.287): `PermissionDenied` hook (16 events), unreported-call closing on Stop with late-Post correction, `<task-notification>` prompts kept out of the main task, no lane from a bare `SubagentStop` (internal /compact agent), launcher waits up to 6 s for an open tab to reconnect after a crash restart.
 - Launcher: `uv run --frozen --no-dev`, fd-level stdout guard, browser only on startup/resume with a 15 s debounce stamp.
 - Redaction covers dict keys and identifier fields with length caps; payloads sanitized to valid JSON/UTF-8. Tool calls match session-wide by `tool_use_id`; failed spawns leave the pending list; a spawn without `subagent_type` counts as `general-purpose`.

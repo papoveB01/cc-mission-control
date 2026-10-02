@@ -790,3 +790,192 @@ def test_completed_without_text_says_completed(store):
     store.ingest(post("Agent", {}, "p1", {"status": "completed", "agentId": "a1", "prompt": "the whole prompt",
                                           "content": [{"type": "tool_use", "name": "x"}]}))
     assert store.call_detail(SID, "p1")["output"] == "Completed"
+
+
+# ---- acceptance-test fixes ------------------------------------------------
+
+NOTIFICATION = (
+    "<task-notification>\n<task-id>a1b2c3</task-id>\n<tool-use-id>toolu_p1</tool-use-id>\n"
+    "<output-file>/tmp/out.output</output-file>\n<status>completed</status>\n"
+    "<summary>Agent \"Find usages\" completed</summary>\n<result>Found 3 usages</result>\n</task-notification>"
+)
+
+
+def test_task_notification_does_not_overwrite_task(store):
+    store.ingest(ev("UserPromptSubmit", prompt="fix the build"))
+    spawn_pre(store, "toolu_p1", "Find usages")
+    store.ingest(ev("SubagentStart", agent_id="a1b2c3", agent_type="Explore"))
+    store.ingest(ev("Stop"))
+    store.ingest(ev("UserPromptSubmit", prompt="\n  " + NOTIFICATION))
+    m = agent(store, "main")
+    assert m["task"] == "fix the build" and m["status"] == "running"
+    last = store.session_dict(SID)["activity"][-1]
+    assert (last["kind"], last["status"], last["text"]) == ("agent", "ok", "Explore result delivered to Main")
+
+
+def test_task_notification_unknown_lane(store):
+    store.ingest(ev("UserPromptSubmit", prompt="real task"))
+    store.ingest(ev("UserPromptSubmit", prompt=NOTIFICATION.replace("a1b2c3", "../x")))
+    assert agent(store, "main")["task"] == "real task"
+    assert store.session_dict(SID)["activity"][-1]["text"] == "Background task notification"
+
+
+def test_task_notification_falls_back_to_tool_use_id(store):
+    spawn_pre(store, "toolu_p1", "Find usages")
+    store.ingest(ev("SubagentStart", agent_id="zzz", agent_type="Explore"))
+    store.ingest(ev("UserPromptSubmit", prompt=NOTIFICATION))
+    assert store.session_dict(SID)["activity"][-1]["text"] == "Explore result delivered to Main"
+
+
+def test_stop_closes_unreported_main_calls_only(store):
+    store.ingest(ev("UserPromptSubmit", prompt="go"))
+    store.ingest(pre("Bash", {"command": "ls /outside"}, "t1"))
+    store.ingest(pre("Read", {"file_path": "/ok"}, "t2"))
+    store.ingest(post("Read", {"file_path": "/ok"}, "t2", {"content": "x"}))
+    store.ingest(pre("Grep", {"pattern": "x"}, "s1", agent_id="a1", agent_type="Explore"))
+    store.ingest(ev("Stop"))
+    c = store.call_detail(SID, "t1")
+    assert c["status"] == "error" and c["error"] == "No result reported (blocked or cancelled)"
+    assert call(store, "main", "t2")["status"] == "ok"
+    assert call(store, "a1", "s1")["status"] == "running"
+    assert agent(store, "main")["errors"] == 1
+    texts = [a["text"] for a in store.session_dict(SID)["activity"] if a["kind"] == "error"]
+    assert texts == ["Bash blocked or cancelled"]
+    store.ingest(ev("SessionEnd"))
+    assert store.call_detail(SID, "s1")["error"] == "Session ended"
+
+
+def test_stop_failure_and_subagent_stop_close_calls(store):
+    store.ingest(pre("Bash", {"command": "x"}, "t1"))
+    store.ingest(pre("Grep", {"pattern": "x"}, "s1", agent_id="a1", agent_type="Explore"))
+    store.ingest(ev("SubagentStop", agent_id="a1", agent_type="Explore"))
+    assert store.call_detail(SID, "s1")["error"].startswith("No result")
+    assert agent(store, "a1")["errors"] == 1
+    assert call(store, "main", "t1")["status"] == "running"
+    store.ingest(ev("StopFailure", error="x"))
+    assert call(store, "main", "t1")["status"] == "error"
+
+
+def test_permission_denied(store):
+    store.ingest(pre("Bash", {"command": "rm -rf /tmp/build"}, "t1"))
+    store.ingest(ev("PermissionDenied", tool_name="Bash", tool_input={"command": "rm -rf /tmp/build"},
+                    tool_use_id="t1", permission_mode="auto", reason="[Irreversible Local Destruction]"))
+    d = store.call_detail(SID, "t1")
+    assert d["status"] == "error" and d["error"] == "Denied: [Irreversible Local Destruction]"
+    assert agent(store, "main")["errors"] == 1
+    last = store.session_dict(SID)["activity"][-1]
+    assert (last["kind"], last["status"], last["text"]) == ("error", "error", "Bash denied")
+
+
+def test_permission_denied_orphan_without_reason(store):
+    store.ingest(ev("PermissionDenied", tool_name="Write", tool_input={"file_path": "/etc/x"}, tool_use_id="t9"))
+    assert store.call_detail(SID, "t9")["error"] == "Denied"
+    assert agent(store, "main")["total_calls"] == 1
+
+
+def test_permission_denied_spawn_drops_pending(store):
+    spawn_pre(store, "p1", "first")
+    store.ingest(ev("PermissionDenied", tool_name="Agent", tool_input={}, tool_use_id="p1", reason="r"))
+    assert store._sessions[SID].pending == []
+
+
+def test_bare_subagent_stop_creates_no_lane(store):
+    store.ingest(ev("SessionStart"))
+    before = len(store.session_dict(SID)["activity"])
+    store.ingest(ev("SubagentStop", agent_id="compact-1"))
+    s = store.session_dict(SID)
+    assert [a["id"] for a in s["agents"]] == ["main"]
+    assert len(s["activity"]) == before + 1
+    assert s["activity"][-1]["text"] == "Background agent finished"
+    store.ingest(ev("SubagentStop", agent_id="x2", agent_type="Plan"))
+    assert store.session_dict(SID)["activity"][-1]["text"] == "Plan finished"
+    store.ingest(pre("Read", {"file_path": "/x"}, "r1", agent_id="late"))
+    assert agent(store, "late")["total_calls"] == 1
+
+
+# ---- late events after synthetic closes -----------------------------------
+
+def test_late_post_after_stop_restores_call_and_count(store, clock):
+    store.ingest(pre("Bash", {"command": "ls"}, "t1"))
+    store.ingest(ev("Stop"))
+    assert agent(store, "main")["errors"] == 1
+    clock.advance(3)
+    store.ingest(post("Bash", {"command": "ls"}, "t1", {"stdout": "x"}))
+    d = store.call_detail(SID, "t1")
+    assert d["status"] == "ok" and d["error"] is None and d["output"] == "x"
+    assert agent(store, "main")["errors"] == 0
+    assert agent(store, "main")["total_calls"] == 1
+    assert [a["kind"] for a in store.session_dict(SID)["activity"]].count("error") == 1  # the close entry only
+
+
+def test_late_failure_after_stop_not_double_counted(store):
+    store.ingest(pre("Bash", {"command": "ls"}, "t1"))
+    store.ingest(ev("Stop"))
+    store.ingest(ev("PostToolUseFailure", tool_name="Bash", tool_use_id="t1", tool_input={}, error="boom"))
+    assert agent(store, "main")["errors"] == 1
+    assert store.call_detail(SID, "t1")["error"] == "boom"
+    store.ingest(ev("PostToolUseFailure", tool_name="Bash", tool_use_id="t1", tool_input={}, error="again"))
+    assert agent(store, "main")["errors"] == 2  # a genuinely second failure event counts
+
+
+def test_late_denied_after_stop_not_double_counted(store):
+    store.ingest(pre("Bash", {"command": "ls"}, "t1"))
+    store.ingest(ev("Stop"))
+    store.ingest(ev("PermissionDenied", tool_name="Bash", tool_use_id="t1", tool_input={}, reason="no"))
+    assert agent(store, "main")["errors"] == 1
+    assert store.call_detail(SID, "t1")["error"] == "Denied: no"
+
+
+def test_late_post_after_session_end_close(store):
+    store.ingest(pre("Bash", {"command": "ls"}, "t1"))
+    store.ingest(ev("SessionEnd"))
+    assert agent(store, "main")["errors"] == 0
+    store.ingest(ev("SessionStart", source="resume"))
+    store.ingest(post("Bash", {"command": "ls"}, "t1", {"stdout": "x"}))
+    assert store.call_detail(SID, "t1")["status"] == "ok"
+    assert agent(store, "main")["errors"] == 0
+
+
+def test_late_post_on_subagent_lane_keeps_lane_done(store):
+    spawn_agent(store, "u1", "Explore", "d", "sa1")
+    store.ingest(pre("Read", {"file_path": "/a"}, "t2", agent_id="sa1", agent_type="Explore"))
+    store.ingest(ev("SubagentStop", agent_id="sa1", agent_type="Explore"))
+    ended = agent(store, "sa1")["ended"]
+    assert agent(store, "sa1")["errors"] == 1
+    store.ingest(post("Read", {"file_path": "/a"}, "t2", {"x": 1}, agent_id="sa1", agent_type="Explore"))
+    a = agent(store, "sa1")
+    assert a["status"] == "done" and a["ended"] == ended and a["errors"] == 0
+    assert call(store, "sa1", "t2")["status"] == "ok"
+
+
+def test_late_failure_and_denied_do_not_revive_lane(store):
+    store.ingest(ev("SubagentStart", agent_id="a1", agent_type="Explore"))
+    store.ingest(ev("SubagentStop", agent_id="a1", agent_type="Explore"))
+    store.ingest(ev("PostToolUseFailure", tool_name="Bash", tool_use_id="x1", tool_input={}, error="e", agent_id="a1"))
+    store.ingest(ev("PermissionDenied", tool_name="Bash", tool_use_id="x2", tool_input={}, agent_id="a1"))
+    assert agent(store, "a1")["status"] == "done"
+    store.ingest(pre("Read", {}, "x3", agent_id="a1"))
+    assert agent(store, "a1")["status"] == "running"
+
+
+def test_stop_before_lane_known_creates_done_lane(store):
+    store.ingest(ev("SubagentStop", agent_id="zz9"))
+    assert store.session_dict(SID)["activity"][-1]["agent_id"] == "main"
+    store.ingest(ev("SubagentStart", agent_id="zz9", agent_type="Explore"))
+    a = agent(store, "zz9")
+    assert a["status"] == "done" and a["ended"] is not None
+    store.ingest(pre("Read", {}, "r1", agent_id="zz9"))
+    assert agent(store, "zz9")["status"] == "running"
+
+
+def test_stop_before_lane_known_then_tool_event(store):
+    store.ingest(ev("SubagentStop", agent_id="zz8"))
+    store.ingest(post("Read", {}, "r1", {"content": "x"}, agent_id="zz8"))
+    assert agent(store, "zz8")["status"] == "done"
+    assert call(store, "zz8", "r1")["status"] == "ok"
+
+
+def test_stopped_set_capped(store):
+    for i in range(600):
+        store.ingest(ev("SubagentStop", agent_id=f"u{i}"))
+    assert len(store._sessions[SID].stopped) <= 256

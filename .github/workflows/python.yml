@@ -75,7 +75,7 @@ jobs:
               "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
               "PostToolUseFailure", "SubagentStart", "SubagentStop", "Stop", "StopFailure",
               "Notification", "PreCompact", "PostCompact", "TaskCreated", "TaskCompleted",
-              "SessionEnd",
+              "SessionEnd", "PermissionDenied",
           }
           URL = "http://127.0.0.1:4317/hook"
 
@@ -105,7 +105,7 @@ jobs:
               for e in errors:
                   print(f"::error::{e}")
               sys.exit(1)
-          print(f"OK: 4 JSON files parse, 15 hook events, version {__version__}")
+          print(f"OK: 4 JSON files parse, 16 hook events, version {__version__}")
           PY
 
   launcher-uv:
