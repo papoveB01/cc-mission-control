@@ -641,3 +641,152 @@ def test_poisoned_fields_end_to_end(store):
     blob.encode("utf-8")
     assert A20 not in blob
     assert MASK in blob
+
+
+# ---- agentId linking from the Agent tool_response -------------------------
+
+def async_resp(aid, **kw):
+    return {"status": "async_launched", "agentId": aid, "description": "d", "prompt": "p",
+            "outputFile": "/tmp/out", **kw}
+
+
+def spawn_pre(store, uid, desc, atype="Explore"):
+    store.ingest(pre("Agent", {"subagent_type": atype, "description": desc, "prompt": "go"}, uid))
+
+
+def test_response_agent_id_before_subagent_start(store):
+    spawn_pre(store, "p1", "first")
+    spawn_pre(store, "p2", "second")
+    store.ingest(post("Agent", {}, "p2", async_resp("agent-a9")))
+    store.ingest(ev("SubagentStart", agent_id="a9", agent_type="Explore"))
+    assert agent(store, "a9")["task"] == "second"
+    assert call(store, "main", "p2")["subagent_id"] == "a9"
+    store.ingest(ev("SubagentStart", agent_id="a8", agent_type="Explore"))
+    assert agent(store, "a8")["task"] == "first"
+
+
+def test_response_corrects_wrong_fifo(store):
+    spawn_pre(store, "p1", "first")
+    spawn_pre(store, "p2", "second")
+    store.ingest(ev("SubagentStart", agent_id="a1", agent_type="Explore"))  # FIFO: p1
+    store.ingest(ev("SubagentStart", agent_id="a2", agent_type="Explore"))  # FIFO: p2
+    store.ingest(post("Agent", {}, "p2", async_resp("a1")))
+    store.ingest(post("Agent", {}, "p1", async_resp("a2")))
+    assert agent(store, "a1")["task"] == "second" and agent(store, "a2")["task"] == "first"
+    assert call(store, "main", "p2")["subagent_id"] == "a1"
+    assert call(store, "main", "p1")["subagent_id"] == "a2"
+
+
+def test_foreground_completed_response_links(store):
+    spawn_pre(store, "p1", "fg")
+    store.ingest(ev("SubagentStart", agent_id="a1", agent_type="Explore"))
+    spawn_pre(store, "p2", "other")
+    store.ingest(post("Agent", {}, "p2", {"status": "completed", "agentId": "a1", "content": [{"type": "text", "text": "done"}],
+                                          "resolvedModel": "claude-haiku-4-5", "totalTokens": 5}))
+    assert call(store, "main", "p2")["subagent_id"] == "a1"
+    assert agent(store, "a1")["task"] == "other"
+    assert store.call_detail(SID, "p2")["output"] == "done"
+    assert agent(store, "a1")["model"] == "claude-haiku-4-5"
+
+
+@pytest.mark.parametrize("bad", ["../etc", "a b", "", "x" * 129, 5, None, "main", "agent-"])
+def test_hostile_agent_id_ignored(store, bad):
+    spawn_pre(store, "p1", "first")
+    store.ingest(post("Agent", {}, "p1", async_resp(bad)))
+    assert call(store, "main", "p1")["subagent_id"] is None
+    store.ingest(ev("SubagentStart", agent_id="a1", agent_type="Explore"))
+    assert agent(store, "a1")["task"] == "first"  # FIFO still works
+
+
+def test_meta_agreeing_with_response_is_noop(store):
+    spawn_pre(store, "p1", "first")
+    store.ingest(post("Agent", {}, "p1", async_resp("a1")))
+    store.ingest(ev("SubagentStart", agent_id="a1", agent_type="Explore"))
+    store.apply_subagent_meta(SID, "a1", "meta text", "p1")
+    a = agent(store, "a1")
+    assert a["task"] == "first"
+    assert call(store, "main", "p1")["subagent_id"] == "a1"
+    spawn_pre(store, "p2", "second")
+    store.ingest(ev("SubagentStart", agent_id="a2", agent_type="Explore"))
+    assert agent(store, "a2")["task"] == "second"
+
+
+def test_async_launch_output_text(store):
+    spawn_pre(store, "p1", "first")
+    store.ingest(post("Agent", {}, "p1", async_resp("a1", resolvedModel="claude-sonnet-4-5")))
+    d = store.call_detail(SID, "p1")
+    assert d["status"] == "ok" and d["output"] == "Launched in background"
+
+
+def test_resolved_model_applied_when_lane_created_later(store):
+    spawn_pre(store, "p1", "first")
+    store.ingest(post("Agent", {}, "p1", async_resp("a1", resolvedModel="m-" + SECRET)))
+    store.ingest(ev("SubagentStart", agent_id="a1", agent_type="Explore"))
+    assert agent(store, "a1")["model"].startswith("m-")
+    assert A20 not in json.dumps(store.snapshot())
+
+
+# ---- agentId link fix round -----------------------------------------------
+
+def _tasks(store):
+    return {a["id"]: a["task"] for a in store.session_dict(SID)["agents"] if a["id"] != "main"}
+
+
+@pytest.mark.parametrize("order", [("b", "a"), ("a", "b")])
+def test_held_link_not_stolen_by_fifo(store, order):
+    spawn_pre(store, "pA", "A")
+    spawn_pre(store, "pB", "B")
+    store.ingest(post("Agent", {}, "pA", async_resp("a")))
+    for aid in order:
+        store.ingest(ev("SubagentStart", agent_id=aid, agent_type="Explore"))
+    assert _tasks(store) == {"a": "A", "b": "B"}
+    assert store._sessions[SID].pending == []
+
+
+def test_displaced_lane_retries_fifo(store):
+    spawn_pre(store, "pA", "A")
+    spawn_pre(store, "pB", "B")
+    store.ingest(ev("SubagentStart", agent_id="x", agent_type="Explore"))  # FIFO: pA
+    store.ingest(post("Agent", {}, "pA", async_resp("y")))  # y does not exist yet: held
+    store.ingest(ev("SubagentStart", agent_id="z", agent_type="Explore"))
+    store.apply_subagent_meta(SID, "z", None, "pA")  # displaces x, which retries and takes pB
+    assert _tasks(store)["x"] == "B" and _tasks(store)["z"] == "A"
+
+
+def test_spawn_structures_bounded(store):
+    for i in range(5000):
+        spawn_pre(store, f"p{i}", f"d{i}")
+        store.ingest(post("Agent", {}, f"p{i}", async_resp(f"zz{i}", resolvedModel="m")))
+    s = store._sessions[SID]
+    assert max(len(s.spawn_links), len(s.spawn_models), len(s.pending), len(s.spawns)) <= 256
+    store.ingest(ev("SessionEnd"))
+    assert not s.spawn_links and not s.spawn_models
+
+
+def test_held_link_dropped_on_failure_and_eviction(clock):
+    st = Store(Config(max_calls=2), clock=clock)
+    spawn_pre(st, "p1", "d")
+    st.ingest(post("Agent", {}, "p1", async_resp("a1")))
+    st.ingest(ev("PostToolUseFailure", tool_name="Agent", tool_use_id="p1", error="x"))
+    assert st._sessions[SID].spawn_links == {}
+    spawn_pre(st, "p2", "d")
+    st.ingest(post("Agent", {}, "p2", async_resp("a2")))
+    for i in range(3):
+        st.ingest(pre("Read", {}, f"r{i}"))
+    assert st._sessions[SID].spawn_links == {}
+    assert st._sessions[SID].spawn_models == {}
+
+
+def test_secret_shaped_agent_id_ignored(store):
+    spawn_pre(store, "p1", "first")
+    store.ingest(post("Agent", {}, "p1", async_resp(SECRET, resolvedModel="m")))
+    s = store._sessions[SID]
+    assert s.spawn_links == {} and s.spawn_models == {}
+    assert A20 not in json.dumps(store.snapshot())
+
+
+def test_completed_without_text_says_completed(store):
+    spawn_pre(store, "p1", "d")
+    store.ingest(post("Agent", {}, "p1", {"status": "completed", "agentId": "a1", "prompt": "the whole prompt",
+                                          "content": [{"type": "tool_use", "name": "x"}]}))
+    assert store.call_detail(SID, "p1")["output"] == "Completed"

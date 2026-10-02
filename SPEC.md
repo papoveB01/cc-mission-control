@@ -144,7 +144,8 @@ All hooks receive common fields: `session_id`, `transcript_path`, `cwd`, `hook_e
 
 **Subagent spawns.** The tool that launches a subagent is named `Agent` (older versions: `Task`). `SubagentStart` carries no link to the spawning call, so linking works in this order:
 
-1. **Meta file (preferred).** Claude Code writes `<session_dir>/subagents/agent-<id>.meta.json` next to the subagent transcript, containing `agentType`, `description`, and `toolUseId`. On `SubagentStart` (and on later polls until found), read it; use `description` as the task and `toolUseId` to link the lane to the spawning `Agent` call. This file is undocumented (observed on Claude Code 2.1.x), so parse defensively.
+0. **Spawn response (documented, preferred).** The spawn tool's `PostToolUse` carries `tool_response.agentId`. Since v2.1.198 subagents run in the background by default, so this Post fires right after launch with `status: "async_launched"` (foreground runs: `status: "completed"` after the subagent finishes). Link `agentId` ↔ `tool_use_id` authoritatively; if the Post arrives before `SubagentStart`, hold the link and apply it when the lane appears. The spawn call shows "Launched in background" and completes immediately; the lane carries the live status.
+1. **Meta file.** Claude Code writes `<session_dir>/subagents/agent-<id>.meta.json` next to the subagent transcript, containing `agentType`, `description`, and `toolUseId`. On `SubagentStart` (and on later polls until found), read it; use `description` as the task and `toolUseId` to link the lane to the spawning `Agent` call. This file is undocumented (observed on Claude Code 2.1.x), so parse defensively.
 2. **Pending list (fallback).** On `PreToolUse` for the spawn tool, record `(tool_use_id, subagent_type, description)`. On `SubagentStart`, if no meta file is available, pop the first pending entry whose type matches `agent_type`. When the meta file appears later, correct the task and remove the matching pending entry.
 
 **Agent IDs.** Documentation examples show `agent_id` both with and without an `agent-` prefix. Normalize by stripping a leading `agent-` before using the ID as a key or building file names.
@@ -322,17 +323,17 @@ File: `scripts/launch.py`. Standard library only, so it starts in milliseconds w
 1. Read the SessionStart JSON from stdin.
 2. `GET http://127.0.0.1:4317/health` (timeout 0.5 s). Accept only a response with `"app": "cc-mission-control"`, so an unrelated service on the port is never mistaken for the server.
 3. If not running, start the server detached:
-   - If `uv` is on PATH: `uv run --quiet --project $CLAUDE_PLUGIN_ROOT python -m cc_mission_control`, with `UV_PROJECT_ENVIRONMENT=$CLAUDE_PLUGIN_DATA/venv` so the virtualenv survives plugin updates.
+   - If `uv` is on PATH: `uv run --quiet --frozen --no-dev --project $CLAUDE_PLUGIN_ROOT python -m cc_mission_control` (`--frozen` so uv never rewrites `uv.lock` inside the plugin cache), with `UV_PROJECT_ENVIRONMENT=$CLAUDE_PLUGIN_DATA/venv` so the virtualenv survives plugin updates.
    - Otherwise, if `fastapi` and `uvicorn` import, run `python -m cc_mission_control` with `PYTHONPATH=$CLAUDE_PLUGIN_ROOT`.
    - Otherwise, print an install hint for uv to stderr and exit 0.
    - Detach: `start_new_session=True` on POSIX; `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows. Redirect output to `$CLAUDE_PLUGIN_DATA/server.log`.
 4. Poll `/health` every 250 ms for up to 15 s (first run builds the environment).
 5. POST the SessionStart event to `/hook` so the session appears immediately.
-6. Open `http://127.0.0.1:4317/` in the browser only if `/health` reports zero connected dashboards, `CCMC_NO_BROWSER` is not `1`, and `CLAUDE_CODE_REMOTE` is not `true`.
+6. Open `http://127.0.0.1:4317/` in the browser only if `/health` reports zero connected dashboards, `CCMC_NO_BROWSER` is not `1`, `CLAUDE_CODE_REMOTE` is not `true`, the event `source` is `startup` or `resume` (not `clear`/`compact`), and no browser was opened in the last 15 s (`<data_dir>/browser.stamp`, so sessions starting together open one tab). Open it with a detached subprocess whose output goes to `/dev/null`.
 
 ## 8.2 Hard rules
 
-- **Never write to stdout.** SessionStart stdout is injected into Claude's context.
+- **Never write to stdout.** SessionStart stdout is injected into Claude's context. Enforce it at the file-descriptor level (`os.dup2(2, 1)` first thing) so child processes and library prints cannot reach it either.
 - **Always exit 0.** Wrap everything in a try/except that writes to stderr.
 - Never block longer than the hook timeout (20 s).
 
@@ -694,4 +695,6 @@ Reference: `https://code.claude.com/docs/en/hooks`
 - Lane payloads drop full input/output; new call-detail endpoint feeds the drawer.
 - Stale-session rule (`CCMC_STALE_MINUTES`), dev-only `CCMC_DEV_ORIGINS`, nested redaction, static bundle in the wheel, Node 22 pinned.
 - README notes workspace trust for project-level plugin config.
+- Subagents link first through the documented `Agent` `tool_response.agentId` (async_launched/completed), then the meta file, then FIFO.
+- Launcher: `uv run --frozen --no-dev`, fd-level stdout guard, browser only on startup/resume with a 15 s debounce stamp.
 - Redaction covers dict keys and identifier fields with length caps; payloads sanitized to valid JSON/UTF-8. Tool calls match session-wide by `tool_use_id`; failed spawns leave the pending list; a spawn without `subagent_type` counts as `general-purpose`.

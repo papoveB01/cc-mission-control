@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import threading
 import time
 from collections import deque
@@ -21,6 +22,8 @@ BIG_WINDOW = 1_000_000
 IDENT_CHARS = 200
 CWD_CHARS = 1000
 DEFAULT_SUBAGENT = "general-purpose"
+AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+LINK_CAP = 256
 STDERR_MARK = "\n[stderr]\n"
 LANE_CALLS = 60
 ACTIVITY_MAX = 80
@@ -93,7 +96,9 @@ class Agent:
     def __post_init__(self) -> None:
         self.calls = deque(maxlen=max(1, self.max_calls))
 
-    def add_call(self, call: Call) -> None:
+    def add_call(self, call: Call) -> Optional[Call]:
+        """Append a call; returns the call pushed out of the deque, if any."""
+        evicted = None
         if len(self.calls) == self.calls.maxlen:
             evicted = self.calls[0]
             if self.index.get(evicted.id) is evicted:
@@ -102,6 +107,7 @@ class Agent:
         self.index[call.id] = call
         self.total_calls += 1
         self.tool_counts[call.tool] = self.tool_counts.get(call.tool, 0) + 1
+        return evicted
 
     def to_dict(self) -> dict:
         counts = dict(sorted(self.tool_counts.items(), key=lambda kv: -kv[1]))
@@ -142,6 +148,8 @@ class Session:
     activity: Deque[dict] = field(default_factory=lambda: deque(maxlen=ACTIVITY_MAX))
     pending: List[dict] = field(default_factory=list)
     spawns: Dict[str, dict] = field(default_factory=dict)
+    spawn_links: Dict[str, str] = field(default_factory=dict)
+    spawn_models: Dict[str, str] = field(default_factory=dict)
 
     def ordered_agents(self) -> List[Agent]:
         subs = [a for a in self.agents.values() if a.id != MAIN]
@@ -210,6 +218,18 @@ def _blocks_text(value: Any) -> str:
     if isinstance(value, list) and any(isinstance(b, dict) and "text" in b for b in value):
         return "\n".join(str(b["text"]) for b in value if isinstance(b, dict) and "text" in b)
     return _dumps(value)
+
+
+def _has_text(resp: dict) -> bool:
+    """True if a tool_response carries real output text under one of OUTPUT_KEYS."""
+    for key in OUTPUT_KEYS:
+        v = resp.get(key)
+        if isinstance(v, list):
+            if any(isinstance(b, dict) and b.get("text") for b in v):
+                return True
+        elif v:
+            return True
+    return False
 
 
 class Store:
@@ -304,36 +324,40 @@ class Store:
                     agent.task = desc
                     self._changed.add(session_id)
                 return
-            if agent.spawn_call_id == tool_use_id:
-                agent.meta_linked = True
-                if not agent.task and desc:
-                    agent.task = desc
-                    self._changed.add(session_id)
-                return
-            prev = agent.spawn_call_id
-            prev_task = agent.task
-            other = next((a for a in s.agents.values() if a is not agent and a.spawn_call_id == tool_use_id), None)
-            if other is not None:
-                if prev:
-                    other.task = s.spawns.get(prev, {}).get("description") or prev_task
-                    other.spawn_call_id = prev
-                    self._link_call(s, prev, other.id)
-                else:
-                    other.spawn_call_id = None
-                    other.task = ""
-                    old = s.spawns.get(tool_use_id)
-                    if old and not any(p["tool_use_id"] == tool_use_id for p in s.pending):
-                        s.pending.insert(0, old)
-            elif prev:
-                self._link_call(s, prev, None)
-                if prev in s.spawns:
-                    s.pending.insert(0, s.spawns[prev])
-            s.pending = [p for p in s.pending if p["tool_use_id"] != tool_use_id]
-            agent.task = desc or s.spawns.get(tool_use_id, {}).get("description") or agent.task
-            agent.spawn_call_id = tool_use_id
-            agent.meta_linked = True
-            self._link_call(s, tool_use_id, agent.id)
+            self._link(s, agent, desc, tool_use_id)
             self._changed.add(session_id)
+
+    def _link(self, s: Session, agent: Agent, desc: str, tool_use_id: str) -> None:
+        """Authoritatively tie a subagent lane to the spawn call that launched it."""
+        if agent.spawn_call_id == tool_use_id:
+            agent.meta_linked = True
+            if not agent.task and desc:
+                agent.task = desc
+            return
+        prev = agent.spawn_call_id
+        prev_task = agent.task
+        retry = None
+        other = next((a for a in s.agents.values() if a is not agent and a.spawn_call_id == tool_use_id), None)
+        if other is not None:
+            if prev:
+                other.task = s.spawns.get(prev, {}).get("description") or prev_task
+                other.spawn_call_id = prev
+                self._link_call(s, prev, other.id)
+            else:
+                other.spawn_call_id = None
+                other.task = ""
+                retry = other
+        elif prev:
+            self._link_call(s, prev, None)
+            if prev in s.spawns:
+                s.pending.insert(0, s.spawns[prev])
+        s.pending = [p for p in s.pending if p["tool_use_id"] != tool_use_id]
+        agent.task = desc or s.spawns.get(tool_use_id, {}).get("description") or agent.task
+        agent.spawn_call_id = tool_use_id
+        agent.meta_linked = True
+        self._link_call(s, tool_use_id, agent.id)
+        if retry is not None:
+            self._fifo(s, retry)
 
     def touch(self, session_id: str) -> None:
         with self._lock:
@@ -474,10 +498,42 @@ class Store:
             err = truncate(err, max(keep_err, cap - len(mark) - len(out)))
         return out + mark + err
 
-    def _make_call(self, agent: Agent, e: dict, now: float) -> Call:
+    def _make_call(self, s: Session, agent: Agent, e: dict, now: float) -> Call:
         call = self._build_call(agent.id, e, now)
-        agent.add_call(call)
+        evicted = agent.add_call(call)
+        if evicted is not None:
+            self._drop_links(s, evicted.id)
         return call
+
+    def _drop_links(self, s: Session, call_id: str) -> None:
+        for sub_id in [k for k, v in s.spawn_links.items() if v == call_id]:
+            del s.spawn_links[sub_id]
+            s.spawn_models.pop(sub_id, None)
+
+    def _trim_spawns(self, s: Session) -> None:
+        for d in (s.spawn_links, s.spawn_models):
+            while len(d) > LINK_CAP:
+                del d[next(iter(d))]
+        del s.pending[: max(0, len(s.pending) - LINK_CAP)]
+        if len(s.spawns) > LINK_CAP:
+            keep = {a.spawn_call_id for a in s.agents.values()}
+            for key in [k for k in s.spawns if k not in keep][: len(s.spawns) - LINK_CAP]:
+                del s.spawns[key]
+
+    def _fifo(self, s: Session, agent: Agent) -> None:
+        """Give a lane the oldest pending spawn of its type that no held link has claimed."""
+        held = set(s.spawn_links.values())
+        want = agent.agent_type or DEFAULT_SUBAGENT
+        idx = next(
+            (i for i, p in enumerate(s.pending) if p["subagent_type"] == want and p["tool_use_id"] not in held),
+            None,
+        )
+        if idx is None:
+            return
+        spawn = s.pending.pop(idx)
+        agent.task = agent.task or spawn["description"]
+        agent.spawn_call_id = spawn["tool_use_id"]
+        self._link_call(s, agent.spawn_call_id, agent.id)
 
     def _build_call(self, agent_id: str, e: dict, now: float) -> Call:
         tool_input = e.get("tool_input")
@@ -503,7 +559,7 @@ class Store:
             tool = self._ident(e.get("tool_name")) or "unknown"
             call = next((c for c in reversed(agent.calls) if c.status == "running" and c.tool == tool), None)
         if call is None:
-            call = self._make_call(agent, e, now)
+            call = self._make_call(s, agent, e, now)
             dur = _millis(e.get("duration_ms"))
             if dur is not None:
                 call.started = now - dur / 1000
@@ -525,6 +581,8 @@ class Store:
                 a.status = "idle"
             elif a.status in ("running", "waiting", "idle"):
                 a.status, a.ended = "done", now
+        s.spawn_links.clear()
+        s.spawn_models.clear()
         s.status, s.ended, s.end_reason = "ended", now, reason
 
     # ---- handlers ---------------------------------------------------------
@@ -558,7 +616,7 @@ class Store:
             fresh = self._build_call(aid, e, now)
             existing.summary, existing.input = fresh.summary, fresh.input
             return
-        call = self._make_call(agent, e, now)
+        call = self._make_call(s, agent, e, now)
         if call.tool in SPAWN_TOOLS:
             tool_input = e.get("tool_input") if isinstance(e.get("tool_input"), dict) else {}
             desc = tool_input.get("description")
@@ -569,13 +627,44 @@ class Store:
             }
             s.spawns[call.id] = spawn
             s.pending.append(spawn)
+            self._trim_spawns(s)
         self._act(s, now, aid, "tool", f"{call.tool}: {call.summary}", "running")
 
     def _h_post_tool(self, s: Session, e: dict, aid: str, now: float) -> None:
         agent = self._agent(s, aid, now, e.get("agent_type"))
         call = self._match(s, agent, e, now)
         self._finish(call, e, now, "ok")
-        call.output = self._output(e.get("tool_response"))
+        resp = e.get("tool_response")
+        call.output = self._output(resp)
+        if call.tool in SPAWN_TOOLS and isinstance(resp, dict):
+            label = {"async_launched": "Launched in background", "completed": "Completed"}.get(resp.get("status"))
+            if label and not _has_text(resp):
+                call.output = label
+            self._link_from_response(s, call, resp)
+
+    def _link_from_response(self, s: Session, call: Call, resp: dict) -> None:
+        """tool_response.agentId is the documented link from a spawn call to its subagent."""
+        raw = resp.get("agentId")
+        if not isinstance(raw, str):
+            return
+        raw = raw.strip()
+        sub_id = raw[len("agent-"):] if raw.startswith("agent-") else raw
+        if not AGENT_ID_RE.match(sub_id) or sub_id == MAIN or self._aid(sub_id) != sub_id:
+            return
+        model = self._ident(resp.get("resolvedModel"))
+        sub = s.agents.get(sub_id)
+        if sub is None:
+            s.spawn_links[sub_id] = call.id
+            if model:
+                s.spawn_models[sub_id] = model
+            self._trim_spawns(s)
+            return
+        desc = ""
+        if not s.spawns.get(call.id, {}).get("description") and isinstance(resp.get("description"), str):
+            desc = self.redactor.text(resp["description"])
+        self._link(s, sub, desc, call.id)
+        if model and not sub.model:
+            sub.model = model
 
     def _h_tool_failure(self, s: Session, e: dict, aid: str, now: float) -> None:
         agent = self._agent(s, aid, now, e.get("agent_type"))
@@ -587,6 +676,8 @@ class Store:
         if call.tool in SPAWN_TOOLS and call.subagent_id is None:
             s.pending = [p for p in s.pending if p["tool_use_id"] != call.id]
             s.spawns.pop(call.id, None)
+        if call.tool in SPAWN_TOOLS:
+            self._drop_links(s, call.id)
         if e.get("is_interrupt") is True:
             text = f"{call.tool} interrupted"
         else:
@@ -599,16 +690,14 @@ class Store:
         agent = self._agent(s, aid, now, e.get("agent_type"))
         agent.status = "running"
         agent.transcript_path = _str(e.get("agent_transcript_path")) or agent.transcript_path
-        if agent.spawn_call_id is None and not agent.meta_linked:
-            idx = next(
-                (i for i, p in enumerate(s.pending) if p["subagent_type"] == (agent.agent_type or DEFAULT_SUBAGENT)),
-                None,
-            )
-            if idx is not None:
-                spawn = s.pending.pop(idx)
-                agent.task = agent.task or spawn["description"]
-                agent.spawn_call_id = spawn["tool_use_id"]
-                self._link_call(s, agent.spawn_call_id, agent.id)
+        linked = s.spawn_links.pop(agent.id, None)
+        model = s.spawn_models.pop(agent.id, None)
+        if model and not agent.model:
+            agent.model = model
+        if linked:
+            self._link(s, agent, "", linked)
+        elif agent.spawn_call_id is None and not agent.meta_linked:
+            self._fifo(s, agent)
         text = f"{agent.label} started" + (f": {agent.task}" if agent.task else "")
         self._act(s, now, aid, "agent", text, "running")
 
