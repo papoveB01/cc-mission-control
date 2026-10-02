@@ -95,6 +95,7 @@ class Agent:
     transcript_path: Optional[str] = None
     spawn_call_id: Optional[str] = None
     meta_linked: bool = False
+    start_entry: Optional[dict] = field(default=None, repr=False)  # its "started" activity dict
     tool_counts: Dict[str, int] = field(default_factory=dict)
     calls: Deque[Call] = field(init=False)
     index: Dict[str, Call] = field(default_factory=dict, init=False)
@@ -336,6 +337,12 @@ class Store:
 
     def _link(self, s: Session, agent: Agent, desc: str, tool_use_id: str) -> None:
         """Authoritatively tie a subagent lane to the spawn call that launched it."""
+        others = [a for a in s.agents.values() if a is not agent and a.id != MAIN and a.start_entry is not None]
+        self._relink(s, agent, desc, tool_use_id)
+        for a in [agent, *others]:
+            self._refresh_start(s, a)
+
+    def _relink(self, s: Session, agent: Agent, desc: str, tool_use_id: str) -> None:
         if agent.spawn_call_id == tool_use_id:
             agent.meta_linked = True
             if not agent.task and desc:
@@ -734,6 +741,15 @@ class Store:
             owner.errors += 1
         call.synthetic = call.counted = False
 
+    def _start_text(self, agent: Agent) -> str:
+        return f"{agent.label} started" + (f": {agent.task}" if agent.task else "")
+
+    def _refresh_start(self, s: Session, agent: Agent) -> None:
+        """Keep a lane's "started" feed entry in step with its (re)linked task."""
+        entry = agent.start_entry
+        if entry is not None and any(x is entry for x in s.activity):
+            entry["text"] = self.redactor.redact(self._start_text(agent))[:ACTIVITY_CHARS]
+
     def _drop_spawn(self, s: Session, call: Call) -> None:
         """A spawn call that failed or was denied will never get a lane."""
         if call.tool not in SPAWN_TOOLS:
@@ -770,8 +786,8 @@ class Store:
             self._link(s, agent, "", linked)
         elif agent.spawn_call_id is None and not agent.meta_linked:
             self._fifo(s, agent)
-        text = f"{agent.label} started" + (f": {agent.task}" if agent.task else "")
-        self._act(s, now, aid, "agent", text, "running")
+        self._act(s, now, aid, "agent", self._start_text(agent), "running")
+        agent.start_entry = s.activity[-1]
 
     def _h_subagent_stop(self, s: Session, e: dict, aid: str, now: float) -> None:
         if aid == MAIN:

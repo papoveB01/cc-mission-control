@@ -979,3 +979,34 @@ def test_stopped_set_capped(store):
     for i in range(600):
         store.ingest(ev("SubagentStop", agent_id=f"u{i}"))
     assert len(store._sessions[SID].stopped) <= 256
+
+
+def _started(store, aid):
+    return next(a["text"] for a in store.session_dict(SID)["activity"] if a["kind"] == "agent" and a["agent_id"] == aid
+                and "started" in a["text"])
+
+
+def test_start_entry_follows_authoritative_link(store):
+    spawn_pre(store, "p1", "Write docs")
+    spawn_pre(store, "p2", "Draft tests")
+    store.ingest(ev("SubagentStart", agent_id="a1", agent_type="Explore"))  # FIFO guess: Write docs
+    store.ingest(ev("SubagentStart", agent_id="a2", agent_type="Explore"))  # FIFO guess: Draft tests
+    assert _started(store, "a1") == "Explore started: Write docs"
+    store.pop_changed()
+    store.ingest(post("Agent", {}, "p2", async_resp("a1")))  # truth: swapped
+    assert store.pop_changed() == {SID}
+    assert agent(store, "a1")["task"] == "Draft tests" and agent(store, "a2")["task"] == "Write docs"
+    assert _started(store, "a1") == "Explore started: Draft tests"
+    assert _started(store, "a2") == "Explore started: Write docs"
+
+
+def test_start_entry_follows_meta_and_tolerates_eviction(store):
+    spawn_pre(store, "p1", "first")
+    spawn_pre(store, "p2", "second")
+    store.ingest(ev("SubagentStart", agent_id="a1", agent_type="Explore"))
+    store.apply_subagent_meta(SID, "a1", "second (meta)", "p2")
+    assert _started(store, "a1") == "Explore started: second (meta)"
+    for i in range(100):
+        store.ingest(pre("Bash", {"command": str(i)}, f"c{i}"))
+    store.apply_subagent_meta(SID, "a1", "again", "p1")  # entry evicted: no error
+    assert agent(store, "a1")["task"] == "again"
