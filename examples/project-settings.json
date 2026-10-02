@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "papoveb01": {
+      "source": {
+        "source": "github",
+        "repo": "papoveB01/cc-mission-control-beta"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "cc-mission-control@papoveb01": true
+  }
+}

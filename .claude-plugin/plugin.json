@@ -1,0 +1,19 @@
+{
+  "name": "cc-mission-control",
+  "version": "0.1.0",
+  "description": "Live dashboard for Claude Code sessions: agents, subagents, context usage, and tool calls in real time.",
+  "author": {
+    "name": "Papove Bombando Mfuana",
+    "url": "https://github.com/papoveB01"
+  },
+  "homepage": "https://github.com/papoveB01/cc-mission-control-beta",
+  "repository": "https://github.com/papoveB01/cc-mission-control-beta",
+  "license": "Elastic-2.0",
+  "keywords": [
+    "observability",
+    "dashboard",
+    "subagents",
+    "hooks",
+    "agent-governance"
+  ]
+}

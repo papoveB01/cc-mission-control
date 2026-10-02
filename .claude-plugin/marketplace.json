@@ -1,0 +1,17 @@
+{
+  "name": "papoveb01",
+  "owner": {
+    "name": "Papove Bombando Mfuana",
+    "url": "https://github.com/papoveB01"
+  },
+  "metadata": {
+    "description": "Claude Code plugins from E&EL Global Inc."
+  },
+  "plugins": [
+    {
+      "name": "cc-mission-control",
+      "source": "./",
+      "description": "Live dashboard for Claude Code sessions: agents, subagents, context usage, and tool calls in real time."
+    }
+  ]
+}
