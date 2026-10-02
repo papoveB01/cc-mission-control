@@ -210,6 +210,14 @@ uv run --extra dev pytest -q
 
 CI also runs Python 3.10 and 3.12 (`uv run -p 3.10 --extra dev pytest -q` locally).
 
+Local CI: `scripts/ci-local.sh` runs the same checks as the GitHub workflows (`python.yml` and `ui-bundle.yml`), for use before a release or while GitHub Actions is unavailable. It validates the manifests (the script is read straight from `python.yml`), runs pytest on Python 3.10, 3.12 and the default interpreter, runs the slow launcher test, then on Node 22 runs `npm ci`, typecheck, tests and build in `ui/` and fails if the build changes `cc_mission_control/static/`. Every step runs even if an earlier one fails, and a PASS/FAIL table is printed at the end. Per-version virtualenvs are cached in `.ci-venvs/` (gitignored).
+
+```
+scripts/ci-local.sh            # everything
+scripts/ci-local.sh --quick    # default interpreter only, no slow launcher test
+scripts/ci-local.sh --no-ui    # skip the UI build and bundle check
+```
+
 Dashboard:
 
 ```

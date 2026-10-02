@@ -10,3 +10,6 @@ ui/node_modules/
 
 # local credentials
 keys/
+
+# local CI virtualenvs (scripts/ci-local.sh)
+.ci-venvs/
