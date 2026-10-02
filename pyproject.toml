@@ -34,3 +34,4 @@ artifacts = ["cc_mission_control/static/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]

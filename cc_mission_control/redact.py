@@ -7,6 +7,7 @@ stored, displayed, or forwarded. Redaction is best effort.
 from __future__ import annotations
 
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -95,6 +96,7 @@ class Redactor:
         """Mask secrets without truncating."""
         if not text:
             return text
+        text = text.encode("utf-8", "replace").decode("utf-8")  # lone surrogates break UTF-8 output
         for pattern in _WHOLE:
             text = pattern.sub(MASK, text)
         text = _BEARER.sub(lambda m: m.group(1) + MASK, text)
@@ -108,15 +110,20 @@ class Redactor:
         return truncate(self.redact(text), self.max_chars)
 
     def value(self, obj: Any) -> Any:
-        """Redact and truncate every string in a nested structure. Keys are kept."""
-        return _walk(obj, self.text)
+        """Redact and truncate every string in a nested structure.
+
+        Dict keys are redacted (not truncated) and non-finite floats become None.
+        """
+        return _walk(obj, self.text, self.redact)
 
 
-def _walk(obj: Any, fn: Callable[[str], str]) -> Any:
+def _walk(obj: Any, fn: Callable[[str], str], key_fn: Callable[[str], str]) -> Any:
     if isinstance(obj, str):
         return fn(obj)
     if isinstance(obj, dict):
-        return {k: _walk(v, fn) for k, v in obj.items()}
+        return {key_fn(k if isinstance(k, str) else str(k)): _walk(v, fn, key_fn) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return [_walk(v, fn) for v in obj]
+        return [_walk(v, fn, key_fn) for v in obj]
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
     return obj

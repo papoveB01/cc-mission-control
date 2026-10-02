@@ -461,7 +461,7 @@ Write `server.pid` to the data directory at startup.
 
 ## 10.2 Redaction
 
-Every string from a hook payload passes through the Redactor before it is stored, displayed, or forwarded. Redaction walks nested objects and arrays in `tool_input` and `tool_response` and redacts every string value; dictionary keys are kept. Matches are replaced with `[redacted]`.
+Every string from a hook payload passes through the Redactor before it is stored, displayed, or forwarded. Redaction walks nested objects and arrays in `tool_input` and `tool_response` and redacts every string value and every dictionary key (keys are redacted but not truncated). Identifier-like fields (`tool_name`, `agent_type`, `model`, `source`, `trigger`, IDs) are redacted and capped at 200 characters; `cwd` at 1000. Non-finite floats become `null` and lone UTF-16 surrogates are replaced, so every pushed message is valid JSON and valid UTF-8. Matches are replaced with `[redacted]`.
 
 Built-in patterns:
 
@@ -694,3 +694,4 @@ Reference: `https://code.claude.com/docs/en/hooks`
 - Lane payloads drop full input/output; new call-detail endpoint feeds the drawer.
 - Stale-session rule (`CCMC_STALE_MINUTES`), dev-only `CCMC_DEV_ORIGINS`, nested redaction, static bundle in the wheel, Node 22 pinned.
 - README notes workspace trust for project-level plugin config.
+- Redaction covers dict keys and identifier fields with length caps; payloads sanitized to valid JSON/UTF-8. Tool calls match session-wide by `tool_use_id`; failed spawns leave the pending list; a spawn without `subagent_type` counts as `general-purpose`.

@@ -134,7 +134,7 @@ def test_text_redacts_before_truncating():
     assert out.endswith("more characters]")
 
 
-def test_value_walks_nested_structures_and_keeps_keys(r):
+def test_value_walks_nested_structures_and_keeps_benign_keys(r):
     payload = {
         "command": "curl -H 'Authorization: Bearer abcdefghijklmnop123' x",
         "env": {"api_key": FAKE["generic_sk"], "count": 3},
@@ -145,6 +145,18 @@ def test_value_walks_nested_structures_and_keeps_keys(r):
     assert out["env"] == {"api_key": MASK, "count": 3}
     assert out["args"] == ["--token", MASK, None, True]
     assert payload["env"]["api_key"] == FAKE["generic_sk"]  # input not mutated
+
+
+def test_value_masks_secret_keys_and_nonfinite_floats(r):
+    out = r.value({FAKE["github_ghp"]: 1, "ok": [float("nan"), float("inf"), 1.5], 7: "x"})
+    assert out == {MASK: 1, "ok": [None, None, 1.5], "7": "x"}
+
+
+def test_redact_replaces_lone_surrogates(r):
+    out = r.redact("a\ud800b")
+    assert out == "a?b"
+    out.encode("utf-8")
+    assert list(r.value({"k\udc00": "v\ud800"})) == ["k?"]
 
 
 def test_from_config_reads_env(tmp_path: Path):
