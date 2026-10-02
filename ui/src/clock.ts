@@ -29,3 +29,10 @@ const getSnapshot = (): number => now;
 export function useNow(): number {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
+
+const noopSubscribe = (): (() => void) => () => {};
+
+/** Like useNow, but only subscribes (and ticks) while `active`. Idle views cost nothing. */
+export function useNowWhen(active: boolean): number {
+  return useSyncExternalStore(active ? subscribe : noopSubscribe, getSnapshot, getSnapshot);
+}

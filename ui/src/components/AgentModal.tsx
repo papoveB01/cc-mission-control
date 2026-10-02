@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { formatClockSeconds, formatTokens } from "../format";
 import { feedItems, feedRowStatus, filterCalls, findAgent, findSpawn, historyStats, liveAgentIds, subagentsOf, type CallFilter, type HistoryPoint } from "../store";
 import { sparkGeometry } from "../spark";
@@ -41,10 +41,10 @@ interface Props {
   onClose: () => void;
   onShowLane: (agentId: string) => void;
   onOpenAgent: (agentId: string) => void;
-  onOpenCall: (call: ToolCall) => void;
+  onOpenCall: (call: ToolCall, trigger: Element) => void;
 }
 
-function Body({ session, agent, names, history, onShowLane, onOpenAgent, onOpenCall, onClose }: Omit<Props, "agentId" | "suspended" | "returnTo" | "skipReturn"> & { agent: Agent }) {
+const Body = memo(function Body({ session, agent, names, history, onShowLane, onOpenAgent, onOpenCall, onClose }: Omit<Props, "agentId" | "suspended" | "returnTo" | "skipReturn"> & { agent: Agent }) {
   const [status, setStatus] = useState<CallFilter>("all");
   const [text, setText] = useState("");
   const [copied, setCopied] = useState(false);
@@ -63,11 +63,18 @@ function Body({ session, agent, names, history, onShowLane, onOpenAgent, onOpenC
   const activity = useMemo(() => feedItems(session.activity).filter((i) => i.entry.agent_id === agent.id), [session.activity, agent.id]);
   const tools = Object.entries(agent.tool_counts);
 
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
   const copy = (): void => {
+    const done = (ok: boolean): void => {
+      setCopied(ok);
+      if (copyTimer.current) clearTimeout(copyTimer.current);
+      copyTimer.current = setTimeout(() => setCopied(false), 1500);
+    };
     try {
-      void navigator.clipboard.writeText(agent.id).then(() => setCopied(true));
+      navigator.clipboard.writeText(agent.id).then(() => done(true)).catch(() => done(false));
     } catch {
-      /* clipboard unavailable */
+      done(false);
     }
   };
 
@@ -92,7 +99,8 @@ function Body({ session, agent, names, history, onShowLane, onOpenAgent, onOpenC
             <dt>Agent id</dt>
             <dd className="mono id-cell">
               <span className="id-text">{agent.id}</span>
-              <button type="button" className="link-btn" onClick={copy}>{copied ? "Copied" : "Copy"}</button>
+              <button type="button" className="link-btn" onClick={copy}>Copy</button>
+              <span className="muted" role="status" aria-live="polite">{copied ? "Copied" : ""}</span>
             </dd>
           </div>
         </dl>
@@ -153,7 +161,7 @@ function Body({ session, agent, names, history, onShowLane, onOpenAgent, onOpenC
           ) : spawn ? (
             <p>
               Spawned by {parentName} via{" "}
-              <button type="button" className="link-btn inline" onClick={() => onOpenCall(spawn.call)}>{spawn.call.tool} call</button>
+              <button type="button" className="link-btn inline" onClick={(e) => onOpenCall(spawn.call, e.currentTarget)}>{spawn.call.tool} call</button>
               <span className="muted mono"> {spawn.call.summary}</span>
             </p>
           ) : (
@@ -218,7 +226,7 @@ function Body({ session, agent, names, history, onShowLane, onOpenAgent, onOpenC
       </div>
     </>
   );
-}
+});
 
 export function AgentModal(props: Props) {
   const { session, agentId, suspended, onClose, returnTo, skipReturn } = props;
@@ -226,19 +234,37 @@ export function AgentModal(props: Props) {
   const opener = useRef<Element | null>(returnTo ?? document.activeElement);
   const agent = findAgent(session.agents, agentId);
 
+  const firstAgent = useRef(agentId);
   useEffect(() => {
     panel.current?.focus();
     const target = opener.current;
     return () => {
-      if (!skipReturn.current && (target instanceof HTMLElement || target instanceof SVGElement) && target.isConnected) target.focus();
-      skipReturn.current = false;
+      if (skipReturn.current) {
+        skipReturn.current = false;
+        return;
+      }
+      const focusable = (el: Element | null): el is HTMLElement | SVGElement => (el instanceof HTMLElement || el instanceof SVGElement) && el.isConnected;
+      if (focusable(target)) return target.focus();
+      // The trigger is gone (collapsed lane, regrouped node, popover): fall back to a stable neighbour.
+      const id = firstAgent.current;
+      const fallbacks = [
+        `[data-node-id="${CSS.escape(id)}"]`,
+        `[data-node-id="group"]`,
+        `#lane-${CSS.escape(id)} .lane-label`,
+        `#session-panel`,
+      ];
+      for (const sel of fallbacks) {
+        const el = document.querySelector(sel);
+        if (focusable(el)) return el.focus();
+      }
     };
   }, [skipReturn]);
 
   // Keep focus inside when the shown agent changes (the previous button unmounts).
+  const present = agent !== null;
   useEffect(() => {
     if (panel.current && !panel.current.contains(document.activeElement)) panel.current.focus();
-  }, [agentId]);
+  }, [agentId, present]);
 
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent): void => {

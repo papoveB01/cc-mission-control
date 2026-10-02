@@ -131,6 +131,7 @@ export const Topology = memo(function Topology({ agents, names, selected, epoch,
     return () => document.removeEventListener("keydown", onKey);
   }, []);
 
+  const stageRef = useRef<HTMLDivElement>(null);
   const posRef = useRef(pos);
   posRef.current = pos;
   const activate = useCallback(
@@ -177,7 +178,7 @@ export const Topology = memo(function Topology({ agents, names, selected, epoch,
 
   return (
     <div className="topo">
-      <div className="topo-stage">
+      <div className="topo-stage" ref={stageRef}>
         <svg className="topo-svg" style={{ maxWidth: Math.max(220, layout.size * 1.25) }} viewBox={`0 0 ${layout.size} ${layout.size}`} role="group" aria-label="Agent topology graph">
           {subs.some((n) => !n.dim) ? (
             <circle className="ring" cx={center} cy={center} r={Math.max(...subs.filter((n) => !n.dim).map((n) => Math.hypot(n.x - center, n.y - center)))} />
@@ -221,7 +222,7 @@ export const Topology = memo(function Topology({ agents, names, selected, epoch,
             <ul>
               {grouped.map((a) => (
                 <li key={a.id}>
-                  <button type="button" className="topo-item" onClick={(e) => { setGroupOpen(false); onOpenAgent(a.id, e.currentTarget); }}>
+                  <button type="button" className="topo-item" onClick={() => { setGroupOpen(false); onOpenAgent(a.id, stageRef.current?.querySelector('[data-node-id="group"]') ?? undefined); }}>
                     <span className={`swatch st-${a.status}`} aria-hidden="true" />
                     <span className="topo-item-name">{nameOf(a)}</span>
                     <span className="muted">{STATUS_TEXT[a.status]}</span>

@@ -15,6 +15,10 @@ interface Props {
   tool: string;
   /** Live status of the call from the session state (drives refetch). */
   status: CallStatus | null;
+  /** An overlay above the drawer (palette, shortcuts) is open: ignore Esc. */
+  suspended?: boolean;
+  /** Element to restore focus to; falls back to the focused element at open. */
+  returnTo?: Element | null;
   onClose: () => void;
 }
 
@@ -27,16 +31,16 @@ function narrowDetail(v: unknown): ToolCallDetail | null {
 
 const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
-export function CallDrawer({ sessionId, callId, tool, status, onClose }: Props) {
+export function CallDrawer({ sessionId, callId, tool, status, suspended = false, returnTo = null, onClose }: Props) {
   const [load, setLoad] = useState<Load>({ kind: "loading" });
   const panel = useRef<HTMLDivElement>(null);
-  const returnTo = useRef<Element | null>(document.activeElement);
+  const opener = useRef<Element | null>(returnTo ?? document.activeElement);
 
   useEffect(() => {
     panel.current?.focus();
-    const target = returnTo.current;
+    const target = opener.current;
     return () => {
-      if (target instanceof HTMLElement && target.isConnected) target.focus();
+      if ((target instanceof HTMLElement || target instanceof SVGElement) && target.isConnected) target.focus();
     };
   }, []);
 
@@ -58,14 +62,14 @@ export function CallDrawer({ sessionId, callId, tool, status, onClose }: Props) 
 
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent): void => {
-      if (e.key === "Escape") {
+      if (e.key === "Escape" && !suspended) {
         e.stopPropagation();
         onClose();
       }
     };
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
-  }, [onClose]);
+  }, [onClose, suspended]);
 
   const trap = (e: KeyboardEvent<HTMLDivElement>): void => {
     if (e.key !== "Tab" || !panel.current) return;

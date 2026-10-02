@@ -991,9 +991,6 @@ button.feed-agent:hover {
   font-size: 16px;
 }
 
-.dock-body {
-  min-height: 64px;
-}
 
 /* Drawer */
 .drawer-root {
@@ -1068,6 +1065,359 @@ button.feed-agent:hover {
   color: var(--err);
 }
 
+
+
+html.scroll-locked {
+  overflow: hidden;
+}
+.modal-body,
+.drawer-body,
+.palette-list,
+.tl-rows,
+.msel-list {
+  overscroll-behavior: contain;
+}
+.main:focus {
+  outline: none;
+}
+
+/* Header palette button */
+.hdr-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+  font: 600 12px/1.5 var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.hdr-btn:hover {
+  background: var(--panel-2);
+}
+kbd {
+  font: 500 11px/1.4 var(--font-mono);
+  padding: 0 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* Dim (not hide) rows that do not match the feed filters */
+.call.dim {
+  opacity: 0.4;
+}
+
+/* Feed filters */
+.ffilters {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ffilters-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.ffilters .m-input {
+  min-width: 100px;
+}
+.factive {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.msel {
+  position: relative;
+}
+.msel summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 2px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+  font: 600 12px/1.5 var(--font-mono);
+}
+.msel summary::-webkit-details-marker {
+  display: none;
+}
+.msel[open] summary {
+  border-color: var(--accent);
+}
+.msel-count {
+  color: var(--accent);
+}
+.msel-list {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 2px);
+  left: 0;
+  width: 220px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 6px 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.msel-opt {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+.feed-toolbar {
+  position: relative;
+  z-index: 2;
+}
+
+/* Dock and timeline */
+/* Stays pinned to the bottom of the viewport while the lanes scroll (>= 900 px). */
+.dock {
+  position: sticky;
+  bottom: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.dock-resize {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 6px;
+  z-index: 3;
+  cursor: ns-resize;
+  touch-action: none;
+}
+.dock-resize:hover,
+.dock-resize:focus-visible {
+  background: var(--accent);
+  opacity: 0.6;
+}
+.dock-head {
+  flex: none;
+  justify-content: space-between;
+}
+.dock-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 700 13px/1 var(--font-mono);
+  color: var(--accent);
+}
+.dock-controls {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.dock-hint {
+  font-size: 12px;
+  margin-right: 8px;
+  white-space: nowrap;
+}
+.dock-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.tl {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 640px;
+  height: 100%;
+}
+.tl-axis {
+  display: flex;
+  flex: none;
+  border-bottom: 1px solid var(--line);
+}
+.tl-gutter {
+  flex: none;
+}
+.tl-tick {
+  stroke: var(--line-strong);
+}
+.tl-tick-label {
+  fill: var(--muted);
+  font: 500 11px var(--font-mono);
+}
+.tl-rows {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  cursor: grab;
+  user-select: none;
+  touch-action: pan-y;
+}
+.tl-row {
+  display: flex;
+  border-bottom: 1px solid var(--line);
+}
+.tl-label {
+  flex: none;
+  padding: 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 12px/24px var(--font-mono);
+  color: var(--accent);
+  text-align: left;
+}
+.tl-label.sub {
+  color: var(--sub);
+}
+.tl-label:hover {
+  text-decoration: underline;
+}
+.tl-plot {
+  display: block;
+  flex: none;
+}
+.tl-grid {
+  stroke: var(--line);
+}
+.tl-bar {
+  cursor: pointer;
+  outline: none;
+}
+.tl-rect {
+  fill: var(--ok);
+}
+.tl-bar.st-running .tl-rect {
+  fill: var(--run);
+}
+.tl-bar.st-error .tl-rect {
+  fill: var(--err);
+}
+.tl-text {
+  fill: var(--void);
+  font: 600 11px var(--font-mono);
+  pointer-events: none;
+}
+.tl-edge {
+  fill: var(--ink);
+}
+.tl-bar:focus-visible .tl-rect,
+.tl-bar:hover .tl-rect {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+.tl-bar.dim {
+  opacity: 0.2;
+}
+.tl-tip {
+  transform: translate(-50%, calc(-100% - 6px));
+  max-width: 260px;
+}
+.tl-tip-summary {
+  font: 12px var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.tl-empty {
+  padding: 8px 12px;
+}
+
+/* Command palette and shortcuts sheet */
+.palette-root {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+}
+.palette {
+  position: relative;
+  width: min(640px, calc(100vw - 32px));
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  box-shadow: 0 0 24px rgba(63, 224, 255, 0.12);
+}
+.palette-input {
+  padding: 12px 16px;
+  background: var(--void);
+  color: var(--ink);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  font: 15px var(--font-mono);
+}
+.palette-input:focus-visible {
+  outline: none;
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.palette-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 4px;
+}
+.palette-heading {
+  padding: 8px 16px 2px;
+}
+.palette-item {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 5px 16px;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+}
+.palette-item.active {
+  background: var(--panel-2);
+  border-left-color: var(--accent);
+}
+.palette-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.palette-detail {
+  flex: none;
+  font: 12px var(--font-mono);
+}
+.palette-empty,
+.palette-hint {
+  padding: 8px 16px;
+  font-size: 12px;
+}
+.sheet-title {
+  font: 700 14px/1.2 var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.sheet-list {
+  padding: 8px 16px;
+}
+.sheet-row {
+  display: grid;
+  grid-template-columns: 11em 1fr;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+.sheet-note {
+  padding: 8px 16px 12px;
+  font-size: 12px;
+}
 
 /* Agent detail modal (SPEC 11.5 feature 5) */
 .modal-root {
@@ -1372,6 +1722,9 @@ button.feed-agent:hover {
     top: 0;
     max-height: 360px;
   }
+  .dock {
+    position: relative;
+  }
   .topo-stage,
   .topo .sr-only {
     display: none;
@@ -1391,7 +1744,8 @@ button.feed-agent:hover {
     order: 5;
     flex-basis: 100%;
   }
-  .header-actions {
+  .hdr-btn kbd,
+  .dock-hint {
     display: none;
   }
   .brand {

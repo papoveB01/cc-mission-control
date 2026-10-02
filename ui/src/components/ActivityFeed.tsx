@@ -1,5 +1,6 @@
 import { memo, type ReactNode, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { formatClockSeconds } from "../format";
+import { filtersActive, matchEntry, type Filters } from "../filters";
 import { MiddleText } from "./MiddleText";
 import { agentName, feedItems, feedRowStatus } from "../store";
 import type { Activity } from "../types";
@@ -38,13 +39,14 @@ interface Props {
   activity: Activity[];
   names: ReadonlyMap<string, string>;
   liveAgents: ReadonlySet<string>;
-  onOpenAgent: (id: string) => void;
+  onOpenAgent: (id: string, trigger: Element) => void;
+  filters: Filters;
   /** Phase B mounts the filter chips here. */
   toolbar?: ReactNode;
 }
 
-export const ActivityFeed = memo(function ActivityFeed({ activity, names, liveAgents, onOpenAgent, toolbar }: Props) {
-  const items = useMemo(() => feedItems(activity), [activity]);
+export const ActivityFeed = memo(function ActivityFeed({ activity, names, liveAgents, onOpenAgent, filters, toolbar }: Props) {
+  const items = useMemo(() => (filtersActive(filters) ? feedItems(activity).filter((i) => matchEntry(filters, i.entry, liveAgents)) : feedItems(activity)), [activity, filters, liveAgents]);
   const scroller = useRef<HTMLOListElement>(null);
   const anchor = useRef<string | null>(null);
   const [away, setAway] = useState(false);
@@ -90,7 +92,7 @@ export const ActivityFeed = memo(function ActivityFeed({ activity, names, liveAg
           <li key={key} className={`feed-item st-${status}`}>
             <span className="feed-time tnum">{formatClockSeconds(entry.t)}</span>
             {names.has(entry.agent_id) ? (
-              <button type="button" className="feed-agent" onClick={() => onOpenAgent(entry.agent_id)} title={`${agentName(names, entry.agent_id)}: open details`}>
+              <button type="button" className="feed-agent" onClick={(e) => onOpenAgent(entry.agent_id, e.currentTarget)} title={`${agentName(names, entry.agent_id)}: open details`}>
                 <MiddleText text={agentName(names, entry.agent_id)} />
               </button>
             ) : (
@@ -108,7 +110,7 @@ export const ActivityFeed = memo(function ActivityFeed({ activity, names, liveAg
           </li>
           );
         })}
-        {items.length === 0 ? <li className="muted feed-empty">No activity yet</li> : null}
+        {items.length === 0 ? <li className="muted feed-empty">{filtersActive(filters) ? "No entries match the filters" : "No activity yet"}</li> : null}
       </ol>
     </aside>
   );

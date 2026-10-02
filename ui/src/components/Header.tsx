@@ -1,4 +1,4 @@
-import { memo, useRef, type KeyboardEvent } from "react";
+import { memo, useRef, type KeyboardEvent, type ReactNode } from "react";
 import { formatClock } from "../format";
 import { tabLabels } from "../store";
 import { Clock } from "./Clock";
@@ -11,9 +11,11 @@ interface Props {
   selectedId: string | null;
   connection: ConnectionState;
   onSelect: (id: string) => void;
+  /** Header buttons (command palette). */
+  actions?: ReactNode;
 }
 
-export const Header = memo(function Header({ sessions, selectedId, connection, onSelect }: Props) {
+export const Header = memo(function Header({ sessions, selectedId, connection, onSelect, actions }: Props) {
   const listRef = useRef<HTMLDivElement>(null);
   const labels = tabLabels(sessions);
 
@@ -63,7 +65,7 @@ export const Header = memo(function Header({ sessions, selectedId, connection, o
         })}
       </div>
       {/* Phase B: command palette button and shortcuts hint mount here. */}
-      <div className="header-actions" id="header-actions" />
+      <div className="header-actions" id="header-actions">{actions}</div>
       <div className={`conn conn-${connection}`} role="status">
         <span className="dot" aria-hidden="true" />
         {CONN_TEXT[connection]}

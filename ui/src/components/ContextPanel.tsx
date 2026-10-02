@@ -11,7 +11,7 @@ const H = 28;
 interface RowProps {
   id: string;
   name: string;
-  onOpen: (id: string) => void;
+  onOpen: (id: string, trigger: Element) => void;
   tokens: number | null;
   window: number | null;
   points: readonly HistoryPoint[];
@@ -24,7 +24,7 @@ const Row = memo(function Row({ id, name, onOpen, tokens, window, points }: RowP
   const pct = tokens !== null && hasWindow ? gaugePercent(tokens, window) : null;
   return (
     <li>
-      <button type="button" className="spark-row" onClick={() => onOpen(id)} aria-label={`${name}: open agent details`}>
+      <button type="button" className="spark-row" onClick={(e) => onOpen(id, e.currentTarget)} aria-label={`${name}: open agent details`}>
       <MiddleText className="spark-name" text={name} />
       <svg className={`spark level-${level}`} viewBox={`0 0 ${W} ${H}`} role="img"
         aria-label={tokens === null ? `${name} context not available` : `${name} context history, now ${formatTokens(tokens)}${pct !== null ? `, ${pct} percent` : ""}${g.drops.length ? `, ${g.drops.length} compactions` : ""}`}>
@@ -46,7 +46,7 @@ interface Props {
   agents: Agent[];
   names: ReadonlyMap<string, string>;
   history: History;
-  onOpenAgent: (id: string) => void;
+  onOpenAgent: (id: string, trigger: Element) => void;
 }
 
 export const ContextPanel = memo(function ContextPanel({ sessionId, agents, names, history, onOpenAgent }: Props) {

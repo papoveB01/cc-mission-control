@@ -4,6 +4,15 @@ import type { Activity, Agent, Session, ToolCall } from "./types";
 export type Sessions = ReadonlyMap<string, Session>;
 
 export const HISTORY_CAP = 300;
+/** A pending compaction flag expires after this many Main samples or this many milliseconds. */
+export const PENDING_MAX_SAMPLES = 3;
+export const PENDING_MAX_MS = 60_000;
+
+export interface PendingCompaction {
+  at: number;
+  samples: number;
+}
+export type PendingMap = ReadonlyMap<string, PendingCompaction>;
 
 /** One context sample for an agent. `drop` marks a compaction. */
 export interface HistoryPoint {
@@ -23,7 +32,7 @@ export interface MissionState {
   version: string | null;
   history: History;
   /** Sessions whose compaction counter rose and whose Main has not yet shown the drop. */
-  pending: ReadonlySet<string>;
+  pending: PendingMap;
   /** Bumped on every snapshot (connect or reconnect); views use it to reset baselines. */
   snapshots: number;
 }
@@ -32,7 +41,7 @@ export type ServerMessage =
   | { type: "snapshot"; version: string; sessions: Session[] }
   | { type: "sessions"; sessions: Session[] };
 
-export const initialState: MissionState = { sessions: new Map(), version: null, history: new Map(), pending: new Set(), snapshots: 0 };
+export const initialState: MissionState = { sessions: new Map(), version: null, history: new Map(), pending: new Map(), snapshots: 0 };
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -138,16 +147,16 @@ export function shareSession(prev: Session | undefined, next: Session): Session 
   return shallowEqual(candidate, prev) ? prev : candidate;
 }
 
-function without(set: ReadonlySet<string>, id: string): ReadonlySet<string> {
-  if (!set.has(id)) return set;
-  const next = new Set(set);
+function without(map: PendingMap, id: string): PendingMap {
+  if (!map.has(id)) return map;
+  const next = new Map(map);
   next.delete(id);
   return next;
 }
 
 interface Recorded {
   history: History;
-  pending: ReadonlySet<string>;
+  pending: PendingMap;
 }
 
 /** Drop history keys of `sessionId` whose agent is not in `keep`. */
@@ -169,14 +178,14 @@ function pruneSession(history: History, sessionId: string, keep: ReadonlySet<str
  * marked as the compaction drop. A falling counter (server restart) resets the session.
  * Histories of agents that left the session are pruned. Returns the same maps when nothing changed.
  */
-export function recordHistory(history: History, pending: ReadonlySet<string>, prev: Session | undefined, next: Session, now: number): Recorded {
+export function recordHistory(history: History, pending: PendingMap, prev: Session | undefined, next: Session, now: number): Recorded {
   let pend = pending;
   let hist = history;
   if (prev && next.compactions < prev.compactions) {
     hist = pruneSession(hist, next.id, new Set());
     pend = without(pend, next.id);
   } else if (prev && next.compactions > prev.compactions && !pend.has(next.id)) {
-    pend = new Set(pend).add(next.id);
+    pend = new Map(pend).set(next.id, { at: now, samples: 0 });
   }
   hist = pruneSession(hist, next.id, new Set(next.agents.map((a) => a.id)));
 
@@ -188,9 +197,16 @@ export function recordHistory(history: History, pending: ReadonlySet<string>, pr
     const last = list[list.length - 1];
     if (last && last.tokens === a.context_tokens) continue;
     let drop = false;
-    if (a.id === "main" && pend.has(next.id) && last && a.context_tokens < last.tokens) {
-      drop = true;
-      pend = without(pend, next.id);
+    const flag = a.id === "main" ? pend.get(next.id) : undefined;
+    if (flag) {
+      if (last && a.context_tokens < last.tokens) {
+        drop = true;
+        pend = without(pend, next.id);
+      } else if (flag.samples + 1 >= PENDING_MAX_SAMPLES || now - flag.at > PENDING_MAX_MS) {
+        pend = without(pend, next.id);
+      } else {
+        pend = new Map(pend).set(next.id, { at: flag.at, samples: flag.samples + 1 });
+      }
     }
     const grown = [...list, { t: now, tokens: a.context_tokens, drop }];
     if (!out) out = new Map(hist);
@@ -206,7 +222,7 @@ export function reduce(state: MissionState, msg: ServerMessage | null, now: numb
     const sessions = new Map<string, Session>();
     const present = new Set(msg.sessions.map((s) => s.id));
     let history: History = new Map([...state.history].filter(([k]) => [...present].some((id) => k.startsWith(`${id}/`))));
-    let pending: ReadonlySet<string> = new Set([...state.pending].filter((id) => present.has(id)));
+    let pending: PendingMap = new Map([...state.pending].filter(([id]) => present.has(id)));
     for (const s of msg.sessions) {
       const prev = state.sessions.get(s.id);
       const shared = shareSession(prev, s);

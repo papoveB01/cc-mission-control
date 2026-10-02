@@ -14,17 +14,19 @@ interface Props {
   stale: boolean;
   /** End time to clamp a stale running call to. */
   cap: number | null;
-  onOpen: (call: ToolCall) => void;
-  onJump: (agentId: string) => void;
+  /** Dimmed by the active feed filters (not hidden). */
+  dim?: boolean;
+  onOpen: (call: ToolCall, trigger: Element) => void;
+  onJump: (agentId: string, trigger: Element) => void;
 }
 
-export const ToolCallRow = memo(function ToolCallRow({ call, spawnLabel, stale, cap, onOpen, onJump }: Props) {
+export const ToolCallRow = memo(function ToolCallRow({ call, spawnLabel, stale, cap, dim = false, onOpen, onJump }: Props) {
   const mono = !PROSE_TOOLS.has(call.tool);
   const running = call.status === "running";
   const mode = running ? runningCallElapsed(stale, cap) : null;
   return (
-    <li className="call">
-      <button type="button" className="call-main" onClick={() => onOpen(call)} data-call-id={call.id}>
+    <li className={`call${dim ? " dim" : ""}`}>
+      <button type="button" className="call-main" onClick={(e) => onOpen(call, e.currentTarget)} data-call-id={call.id}>
         <span className={`dot dot-${running && stale ? "stale" : call.status}`} aria-hidden="true" />
         <span className="sr-only">{running && stale ? "interrupted" : STATUS_TEXT[call.status]}: </span>
         <span className="call-tool">{call.tool}</span>
@@ -45,7 +47,7 @@ export const ToolCallRow = memo(function ToolCallRow({ call, spawnLabel, stale, 
         <button
           type="button"
           className="spawn-link"
-          onClick={() => onJump(call.subagent_id as string)}
+          onClick={(e) => onJump(call.subagent_id as string, e.currentTarget)}
           aria-label={`Go to ${spawnLabel} lane`}
         >
           {"\u2192 "}

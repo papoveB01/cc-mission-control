@@ -1,4 +1,5 @@
 import { createContext, memo, useCallback, useContext, useEffect, useState } from "react";
+import { filtersActive, matchCall, type Filters } from "../filters";
 import { isStale } from "../store";
 import { plural } from "../format";
 import type { Agent, AgentStatus, ToolCall } from "../types";
@@ -28,11 +29,12 @@ interface Props {
   /** Epoch seconds when the owning session ended, or null while it is active. */
   sessionEnded: number | null;
   highlighted: boolean;
-  onOpenCall: (call: ToolCall) => void;
+  filters: Filters;
+  onOpenCall: (call: ToolCall, trigger: Element) => void;
   onOpenAgent: (agentId: string, trigger?: Element) => void;
 }
 
-export const AgentLane = memo(function AgentLane({ agent, sessionEnded, highlighted, onOpenCall, onOpenAgent }: Props) {
+export const AgentLane = memo(function AgentLane({ agent, sessionEnded, highlighted, filters, onOpenCall, onOpenAgent }: Props) {
   const names = useContext(LaneLabels);
   const isMain = agent.id === "main";
   const name = isMain ? agent.label : (names.get(agent.id) ?? agent.label);
@@ -74,7 +76,8 @@ export const AgentLane = memo(function AgentLane({ agent, sessionEnded, highligh
       {finished ? <span className="lane-count tnum">{plural(agent.total_calls, "call")}</span> : null}
     </div>
   );
-  const jumpSpawn = useCallback((id: string): void => onOpenAgent(id), [onOpenAgent]);
+  const jumpSpawn = useCallback((id: string, el: Element): void => onOpenAgent(id, el), [onOpenAgent]);
+  const filtering = filtersActive(filters);
 
   if (collapsed) {
     return (
@@ -121,6 +124,7 @@ export const AgentLane = memo(function AgentLane({ agent, sessionEnded, highligh
               <ToolCallRow
                 key={c.id}
                 call={c}
+                dim={filtering && !matchCall(filters, c)}
                 stale={stale}
                 cap={end}
                 spawnLabel={c.subagent_id ? (names.get(c.subagent_id) ?? null) : null}
