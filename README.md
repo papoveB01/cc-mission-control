@@ -2,21 +2,24 @@
 
 A Claude Code plugin that opens a live local dashboard for your session. It shows every agent working in the session (the main thread and each subagent), what each one is doing, how much of its context window it has used, and every tool call it makes. It runs on your machine, only observes, and never blocks or changes a tool call.
 
-![The dashboard with a main agent and three running subagents](docs/screenshot.png)
+![The dashboard with a main agent, four subagents, the topology graph, the activity feed and the timeline](docs/screenshot.png)
 
 **Quick start:** in Claude Code run `/plugin marketplace add papoveB01/cc-mission-control`, then `/plugin install cc-mission-control@papoveb01`, then start a new session. The dashboard opens at http://127.0.0.1:4317/. Needs Python 3.10+ and [uv](https://docs.astral.sh/uv/) (see Requirements).
 
-A dark theme is included and follows your system setting: [dark screenshot](docs/screenshot-dark.png).
+**What's new in 0.2.0:** the dashboard is redesigned as a dark HUD. It adds an agent topology graph, radial context dials with context history, an agent detail modal (click any agent), a tool-call timeline dock, a command palette (Ctrl/Cmd+K), keyboard shortcuts and feed filters. The light theme is gone; there is one dark theme.
 
 What it shows:
 
-- **Agent lanes.** One lane per agent: the main session first, then running subagents, then finished ones.
-- **Context gauge per agent.** Tokens in context versus the model's window, updated after every model turn.
+- **Agent lanes.** One card per agent: the main session first, then running subagents, then finished ones.
+- **Topology.** A graph of the main agent and its subagents, with each node's context usage and status.
+- **Context dial per agent.** Tokens in context versus the model's window, plus a history sparkline, updated after every model turn.
 - **Current task per agent.** Your prompt for the main thread; the delegated description for each subagent.
 - **Tool calls per agent.** Tool name, one-line summary, status (running, succeeded, failed) and duration. Click a call to see its full input and output, redacted.
-- **Tool tally per agent.** Calls by tool name, plus an error count.
-- **Session activity feed.** Prompts, tool calls, subagent start and finish, compactions, notifications and failures across all agents.
+- **Timeline.** Every tool call as a bar on a time axis, one row per agent, so parallel work is visible.
+- **Session activity feed** with filters. Prompts, tool calls, subagent start and finish, compactions, notifications and failures across all agents.
 - **Multiple sessions.** Each Claude Code session on the machine is its own tab.
+
+More screenshots: [agent detail modal](docs/screenshot-modal.png), [command palette](docs/screenshot-palette.png).
 
 ## Requirements
 
@@ -102,13 +105,62 @@ Then start a new session.
 
 ## Using the dashboard
 
-- **Tabs.** The header has one tab per Claude Code session, active ones first; ended sessions are dimmed. The most recently started active session is selected by default. Once you pick a tab, the selection stays until you change it. The indicator on the right shows Live, Reconnecting or Offline for the connection to the server.
-- **Summary line.** Project name, model, start time, agents running, total calls, total errors and the number of compactions.
-- **Lanes.** Each lane has a colored left edge for its status (running, waiting, idle, done, error), the task text, a context gauge, a tool tally and the most recent calls. Finished subagents collapse to one line; click to expand.
-- **Context gauge.** Tokens in context against the window. The bar is neutral under 60%, amber from 60% to 80% and red above 80%. It reads "not available" when no transcript has been found for that agent, rather than showing zero. The window is 200,000 tokens unless the model is a 1M model (see `CCMC_CONTEXT_WINDOW`).
-- **Call drawer.** Click a call to open its full redacted input, output, error, timestamps and duration in a drawer on the right. Esc closes it.
-- **Activity feed.** Newest first, across all agents. Auto-scroll pauses while you scroll. Below 900 px wide it moves under the lanes.
-- **Duplicate lanes.** Subagents with the same type get numbered labels (`general-purpose 1`, `general-purpose 2`, ...). A spawn call in the main lane has a link to the lane it created.
+The page is a single dark HUD. From top to bottom: the header with one tab per session, a telemetry strip, the working area (topology and context panels on the left, agent lanes in the middle, the activity feed on the right) and the timeline dock along the bottom. On narrower windows the panels stack in a single column and the topology becomes a compact list.
+
+### Sessions and header
+
+One tab per Claude Code session, active ones first; ended sessions are dimmed. The most recently started active session is selected by default, and once you pick a tab it stays selected until you change it (`[` and `]` switch sessions). The header shows the connection state (Live, Reconnecting or Offline) and a clock. The telemetry strip shows project, model, start time, uptime, agents running, total calls, total errors, compactions and time since the last event.
+
+### Agent lanes
+
+Each lane has a colored edge for its status (running, waiting, idle, done, error), the task text, a radial context dial, a call and error count, a tool tally and the most recent calls. Finished subagents collapse to one line; click to expand. Subagents of the same type get numbered labels (`general-purpose 1`, `general-purpose 2`, ...), and the spawn call in the main lane links to the lane it created.
+
+### Context dial and history
+
+The dial shows tokens in context against the window and the percentage. It is neutral under 60%, amber from 60% to 80% and red above 80%, and reads "n/a" when no transcript has been found for that agent. The window is 200,000 tokens unless the model is a 1M model (see `CCMC_CONTEXT_WINDOW`). The Context panel lists one sparkline per agent, with a mark where a compaction dropped the count.
+
+The history behind the sparklines is recorded in your browser, from the moment the page loads. It is kept in memory only (up to 300 points per agent) and is lost when you reload the page; the server does not store it.
+
+### Topology graph
+
+The main agent sits in the center and subagents around it; finished ones are dimmed. Each node has an arc showing its context usage and pulses briefly on a new tool call. Hover for the task, status, calls and context. Click a node (or press Enter on it) to open the agent detail modal. `g` moves focus to the graph.
+
+### Agent detail modal
+
+Click any agent, anywhere: a graph node, a lane title, a row in the Context panel, an agent name in the feed or timeline, a spawn link, or an agent result in the palette. The modal shows the agent's type, status, elapsed time, model and id (with a copy button), a large dial with its full context history, the full task text and, for subagents, the final result. Lineage shows which call spawned a subagent, or lists a main agent's subagents. Below that are the tool tally, every call the dashboard has for that agent (filter by all, running or errors, or by text) and that agent's feed entries. It updates live. "Show lane" closes the modal and scrolls to the lane. Esc or a click outside closes it.
+
+### Call drawer
+
+Click a call anywhere (a lane, the timeline, the palette or the modal) to open a drawer on the right with its full redacted input, output, error, timestamps and duration. Esc closes it.
+
+### Timeline dock
+
+One row per agent, with time along the x axis. Each call is a bar from start to end, colored by status; a running call extends to now. Overlapping bars show parallel work. Hover for the tool, summary and duration; click a bar to open the call drawer. Ctrl/Cmd + scroll (or pinch) zooms, dragging or Shift + scroll pans, and the `-`/`+` buttons zoom too. **Follow live** keeps the right edge at now (it switches off when you pan). **Fit** shows the whole session. The dock can be collapsed (`t`) and resized by dragging its top edge or with the arrow keys. It shows the last 60 calls per agent. Dock height and collapsed state are remembered in your browser.
+
+### Activity feed and filters
+
+The feed is newest first, across all agents; auto-scroll pauses while you scroll. Filters sit above it: status (all, errors, running), an agent selector, a tool selector, and a text box. Active filters are shown as chips with a clear-all. Filters narrow the feed and also dim, rather than hide, the non-matching calls in lanes and bars in the timeline. They are saved per browser (`localStorage`). `f` focuses the filter box and `e` opens the next error call.
+
+### Command palette
+
+Press Ctrl+K (Cmd+K on macOS) or use the Search button. Type to fuzzy-search sessions, agents, recent calls and actions (toggle timeline, follow live, fit timeline, clear filters, jump to next error, show shortcuts). Arrow keys move, Enter runs, Esc closes.
+
+### Keyboard shortcuts
+
+Single-key shortcuts are ignored while you are typing in an input or while Ctrl, Cmd or Alt is held.
+
+| Key | Action |
+|---|---|
+| Ctrl+K / Cmd+K | Open or close the command palette |
+| `?` | Show the shortcuts sheet |
+| `[` / `]` | Previous / next session |
+| `g` | Focus the topology |
+| `t` | Toggle the timeline dock |
+| `f` | Focus the feed filter |
+| `e` | Open the next error call |
+| Esc | Close the top overlay |
+
+The animations (pulses on new calls, eased dials, the shimmer on running lanes) are switched off when your system asks for reduced motion.
 
 Some messages you will see:
 
