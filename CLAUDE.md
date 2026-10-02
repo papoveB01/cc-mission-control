@@ -41,4 +41,11 @@ Event flow: Claude Code → `hooks/hooks.json` → FastAPI server on `127.0.0.1:
 
 ## Working model
 
-Hub and spoke. The main session coordinates and does the final review, and does not write code itself. Implementation goes to a Sonnet subagent, and code review to a separate Sonnet subagent. The coordinator then runs the tests, reads the diff, and decides before committing.
+Hub and spoke. The main session (the hub) coordinates and gives the final review. It does not write code. Each milestone runs this loop:
+
+1. **Brief.** The hub writes a self-contained brief for a Sonnet coder subagent (`model: sonnet`): the SPEC sections, the exact API other milestones depend on, the rules spelled out, acceptance criteria, and no git commits.
+2. **Review.** A separate Sonnet reviewer subagent reviews the resulting diff against SPEC.md and the brief.
+3. **Fix.** The coder addresses the review findings.
+4. **Final review.** The hub runs the tests (3.14 and 3.10), reads the diff, and decides whether to send it back or commit.
+
+The hub keeps coordination work: briefs, git commits and pushes, SPEC.md and CLAUDE.md edits, and verification commands.
