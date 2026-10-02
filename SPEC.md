@@ -565,6 +565,68 @@ Theme follows `prefers-color-scheme`. Respect `prefers-reduced-motion` (disable 
 - Node 22 (pinned in `ui/.nvmrc` and `engines`) so local builds match CI byte-for-byte.
 - Commit `package-lock.json` and the built `static/` folder.
 
+## 11.5 HUD redesign (v0.2.0)
+
+v0.2.0 replaces the flight-strip look (11.1 layout and 11.3 tokens) with a dark sci-fi HUD, and adds four interactive features. Section 11.2 behavior (socket, selection rules, drawer contract, empty state, a11y) still applies unless overridden here. One theme only: the light theme and `prefers-color-scheme` switching are removed.
+
+### Principles
+- **Signal over decoration.** Every glow, pulse or animation encodes state (running, new call, error, threshold crossed). Nothing loops for decoration alone.
+- **Motion is subtle and purposeful** (user decision): pulses on new tool calls, eased gauge fills (300 ms), a slow scan shimmer on running lanes, a soft glow when an agent starts. Under `prefers-reduced-motion: reduce` all animation and transitions are disabled; state stays conveyed by color + text + glyph.
+- **Readable for hours.** Body text ≥ 13 px, WCAG AA (4.5:1) for all text, 3:1 for meaningful graphics. No full-screen scanlines or flicker.
+- **Offline and self-contained.** No external fonts, images or requests; no new runtime dependencies (graph and timeline are hand-built SVG). Bundle budget: JS ≤ 80 kB gzip.
+
+### Tokens (CSS custom properties on `:root`)
+| Token | Value | Use |
+|---|---|---|
+| `--void` | `#05080E` | page background |
+| `--grid` | `rgba(63,224,255,0.05)` | 32 px background grid lines |
+| `--panel` | `#0B121C` | panels |
+| `--panel-2` | `#101A27` | raised elements, rows on hover |
+| `--line` | `rgba(122,162,199,0.22)` | hairline borders |
+| `--ink` | `#E2ECF6` | primary text |
+| `--muted` | `#8EA2B9` | secondary text (≥ 4.5:1 on `--panel`) |
+| `--accent` | `#3FE0FF` | cyan: focus, selection, main agent, links |
+| `--sub` | `#A99BFF` | violet: subagents |
+| `--run` | `#FFB547` | running |
+| `--ok` | `#3DDC97` | succeeded / done |
+| `--err` | `#FF5D6C` | failed |
+| `--wait` | `#FFD166` | waiting for input |
+| glow | `0 0 0 1px color, 0 0 12px color@35%` | active/running elements only |
+
+Typography (system fonts only): headings and HUD labels `ui-monospace, "SF Mono", Menlo, Consolas, monospace`, uppercase, letter-spacing 0.08em, 11–12 px (this intentionally overrides the sentence-case rule for small labels only); body and task text `system-ui` sentence case; numbers `font-variant-numeric: tabular-nums`. Panel corners: 2 px radius with 8 px corner brackets drawn on hover/focus (CSS pseudo-elements).
+
+### Layout (≥ 1200 px)
+```
+┌ MISSION CONTROL ─ [channels: session tabs] ───────── ◉ LIVE  14:02:31 ┐
+│ telemetry strip: model · uptime · agents running · calls · errors · ⟳ │
+├───────────────┬──────────────────────────────────┬────────────────────┤
+│ TOPOLOGY      │ AGENT LANES (cards)              │ ACTIVITY  [filters]│
+│ (graph)       │  dial · task · tally · calls     │ feed               │
+│ CONTEXT       │                                  │                    │
+│ (sparklines)  │                                  │                    │
+├───────────────┴──────────────────────────────────┴────────────────────┤
+│ TIMELINE (collapsible dock, resizable height, default 200 px)         │
+└────────────────────────────────────────────────────────────────────────┘
+```
+900–1199 px: topology + context stack above the lanes; feed stays right. < 900 px: single column (topology, lanes, feed, timeline); topology collapses to a compact list. No horizontal page scroll at 360 px (timeline scrolls inside itself).
+
+### Feature 1 — agent topology graph
+SVG. Main at center; subagents on a ring (evenly spaced by start order; finished ones dimmed on an outer ring). Edges from Main to each subagent labeled by the spawn call. Node = circle with an arc showing context % (same thresholds as the dial), label (numbered names per 8th-milestone rule), status color. A node pulses once (≤ 400 ms) per new tool call on that agent. Hover: tooltip with task, status, calls, context. Click/Enter: scroll to and highlight that lane; selected node gets the accent ring. Keyboard: nodes are focusable in lane order. Accessible name per node; the graph has a text alternative (a visually hidden list). Up to 24 subagents without overlap; beyond that, group finished ones into a "+N finished" node.
+
+### Feature 2 — tool-call timeline
+SVG dock at the bottom. One row per agent (same order as lanes), x = time. Each call is a bar from `started` to `ended` (running bars extend to "now" with a moving edge), colored by status; tool initial or name drawn when wide enough. Shows parallelism (overlapping bars across rows) and long calls at a glance. Interactions: hover tooltip (tool, summary, duration); click opens the call drawer; wheel/pinch or +/− buttons zoom the time axis; drag or scroll to pan; "Follow live" toggle (on by default) keeps the right edge at now; "Fit" shows the whole session. Time axis ticks adapt to zoom. Uses only data already in lanes (last 60 calls per agent).
+
+### Feature 3 — radial gauges + context history
+Each lane shows a radial dial (270° arc) with tokens / window and percent in the center, thresholds as 11.2 (neutral cyan < 60 %, amber 60–80 %, red > 80 %), "n/a" when null; `role="meter"` kept. The client records a context history per agent (timestamp, tokens) whenever `context_tokens` changes, capped at 300 points per agent, kept in memory for the page lifetime (lost on reload — acceptable). A CONTEXT panel shows one sparkline per agent; compactions show as a drop marked with a tick. Animated counters (calls, errors) ease to new values (disabled under reduced motion).
+
+### Feature 4 — command palette, shortcuts, filters
+- **Palette** (`Cmd+K` / `Ctrl+K`, also a header button): fuzzy search over sessions, agents (numbered labels), recent calls (tool + summary) and actions (toggle timeline, follow live, fit timeline, clear filters, jump to errors). Enter executes; Esc closes; arrow keys move; focus trapped; results grouped with headings.
+- **Shortcuts:** `?` shows a shortcuts sheet; `[` / `]` previous/next session; `g` focus topology; `t` toggle timeline; `f` focus feed filter; `e` jump to next error call; `Esc` closes overlays. Shortcuts ignored while typing in an input.
+- **Feed filters:** chips for status (all / errors / running), agent multi-select, tool multi-select, and a text filter; active filters shown with a clear-all. Filters also dim (not hide) non-matching lanes' calls and timeline bars. Filter state persists per browser in `localStorage` (try/catch guarded).
+
+### Unchanged
+Data contract (9.2/9.3), WS handling, the drawer's detail fetch/inert/focus rules, empty state text, deterministic build and Node 22, server and Python side. No new HTTP endpoints.
+
 # 12. Configuration
 
 | Variable | Default | Purpose |
@@ -702,5 +764,6 @@ Reference: `https://code.claude.com/docs/en/hooks`
 - README notes workspace trust for project-level plugin config.
 - Subagents link first through the documented `Agent` `tool_response.agentId` (async_launched/completed), then the meta file, then FIFO.
 - From real-session acceptance (Claude Code 2.1.287): `PermissionDenied` hook (16 events), unreported-call closing on Stop with late-Post correction, `<task-notification>` prompts kept out of the main task, no lane from a bare `SubagentStop` (internal /compact agent), launcher waits up to 6 s for an open tab to reconnect after a crash restart.
+- v0.2.0 (planned): HUD redesign per 11.5 — single dark theme, topology graph, timeline, radial gauges with context history, command palette, shortcuts and filters.
 - Launcher: `uv run --frozen --no-dev`, fd-level stdout guard, browser only on startup/resume with a 15 s debounce stamp.
 - Redaction covers dict keys and identifier fields with length caps; payloads sanitized to valid JSON/UTF-8. Tool calls match session-wide by `tool_use_id`; failed spawns leave the pending list; a spawn without `subagent_type` counts as `general-purpose`.
