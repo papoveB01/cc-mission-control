@@ -1,11 +1,18 @@
 import { useEffect, useReducer, useState } from "react";
-import { initialState, parseMessage, reduce, type MissionState } from "./store";
+import { initialState, parseMessage, reduce, type MissionState, type ServerMessage } from "./store";
 import type { ConnectionState } from "./types";
 
 export const BACKOFF_MIN_MS = 500;
 export const BACKOFF_MAX_MS = 5000;
 export const OFFLINE_AFTER_FAILURES = 3;
 const PING_MS = 20_000;
+
+interface Action {
+  msg: ServerMessage | null;
+  now: number;
+}
+
+const reducer = (state: MissionState, a: Action): MissionState => reduce(state, a.msg, a.now);
 
 /** 0.5 s, 1 s, 2 s, 4 s, 5 s, 5 s ... */
 export function backoffDelay(failures: number): number {
@@ -17,7 +24,7 @@ export function connectionAfterFailure(consecutiveFailures: number): ConnectionS
 }
 
 export function useMissionSocket(): { state: MissionState; connection: ConnectionState } {
-  const [state, dispatch] = useReducer(reduce, initialState);
+  const [state, dispatch] = useReducer(reducer, initialState);
   const [connection, setConnection] = useState<ConnectionState>("reconnecting");
 
   useEffect(() => {
@@ -39,7 +46,7 @@ export function useMissionSocket(): { state: MissionState; connection: Connectio
         }, PING_MS);
       };
       sock.onmessage = (ev: MessageEvent) => {
-        dispatch(parseMessage(ev.data));
+        dispatch({ msg: parseMessage(ev.data), now: Date.now() });
       };
       sock.onclose = () => {
         if (ping !== null) clearInterval(ping);

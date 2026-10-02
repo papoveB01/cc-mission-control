@@ -3,16 +3,36 @@ import type { Activity, Agent, Session, ToolCall } from "./types";
 
 export type Sessions = ReadonlyMap<string, Session>;
 
+export const HISTORY_CAP = 300;
+
+/** One context sample for an agent. `drop` marks a compaction. */
+export interface HistoryPoint {
+  /** Client receive time, epoch milliseconds. */
+  t: number;
+  tokens: number;
+  drop: boolean;
+}
+
+/** Keyed by `${sessionId}/${agentId}`. Arrays are replaced (never mutated) when they change. */
+export type History = ReadonlyMap<string, readonly HistoryPoint[]>;
+
+export const historyKey = (sessionId: string, agentId: string): string => `${sessionId}/${agentId}`;
+
 export interface MissionState {
   sessions: Sessions;
   version: string | null;
+  history: History;
+  /** Sessions whose compaction counter rose and whose Main has not yet shown the drop. */
+  pending: ReadonlySet<string>;
+  /** Bumped on every snapshot (connect or reconnect); views use it to reset baselines. */
+  snapshots: number;
 }
 
 export type ServerMessage =
   | { type: "snapshot"; version: string; sessions: Session[] }
   | { type: "sessions"; sessions: Session[] };
 
-export const initialState: MissionState = { sessions: new Map(), version: null };
+export const initialState: MissionState = { sessions: new Map(), version: null, history: new Map(), pending: new Set(), snapshots: 0 };
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -118,18 +138,94 @@ export function shareSession(prev: Session | undefined, next: Session): Session 
   return shallowEqual(candidate, prev) ? prev : candidate;
 }
 
+function without(set: ReadonlySet<string>, id: string): ReadonlySet<string> {
+  if (!set.has(id)) return set;
+  const next = new Set(set);
+  next.delete(id);
+  return next;
+}
+
+interface Recorded {
+  history: History;
+  pending: ReadonlySet<string>;
+}
+
+/** Drop history keys of `sessionId` whose agent is not in `keep`. */
+function pruneSession(history: History, sessionId: string, keep: ReadonlySet<string>): History {
+  const prefix = `${sessionId}/`;
+  let out: Map<string, readonly HistoryPoint[]> | null = null;
+  for (const key of history.keys()) {
+    if (key.startsWith(prefix) && !keep.has(key.slice(prefix.length))) {
+      if (!out) out = new Map(history);
+      out.delete(key);
+    }
+  }
+  return out ?? history;
+}
+
+/**
+ * Append context samples for one session. A sample is recorded when `context_tokens` changes.
+ * A rising compaction counter sets a pending flag; the next Main sample whose tokens fall is
+ * marked as the compaction drop. A falling counter (server restart) resets the session.
+ * Histories of agents that left the session are pruned. Returns the same maps when nothing changed.
+ */
+export function recordHistory(history: History, pending: ReadonlySet<string>, prev: Session | undefined, next: Session, now: number): Recorded {
+  let pend = pending;
+  let hist = history;
+  if (prev && next.compactions < prev.compactions) {
+    hist = pruneSession(hist, next.id, new Set());
+    pend = without(pend, next.id);
+  } else if (prev && next.compactions > prev.compactions && !pend.has(next.id)) {
+    pend = new Set(pend).add(next.id);
+  }
+  hist = pruneSession(hist, next.id, new Set(next.agents.map((a) => a.id)));
+
+  let out: Map<string, readonly HistoryPoint[]> | null = null;
+  for (const a of next.agents) {
+    if (a.context_tokens === null) continue;
+    const key = historyKey(next.id, a.id);
+    const list = hist.get(key) ?? [];
+    const last = list[list.length - 1];
+    if (last && last.tokens === a.context_tokens) continue;
+    let drop = false;
+    if (a.id === "main" && pend.has(next.id) && last && a.context_tokens < last.tokens) {
+      drop = true;
+      pend = without(pend, next.id);
+    }
+    const grown = [...list, { t: now, tokens: a.context_tokens, drop }];
+    if (!out) out = new Map(hist);
+    out.set(key, grown.length > HISTORY_CAP ? grown.slice(grown.length - HISTORY_CAP) : grown);
+  }
+  return { history: out ?? hist, pending: pend };
+}
+
 /** Pure reducer. Unknown or empty messages return the same state object. */
-export function reduce(state: MissionState, msg: ServerMessage | null): MissionState {
+export function reduce(state: MissionState, msg: ServerMessage | null, now: number = Date.now()): MissionState {
   if (!msg) return state;
   if (msg.type === "snapshot") {
     const sessions = new Map<string, Session>();
-    for (const s of msg.sessions) sessions.set(s.id, shareSession(state.sessions.get(s.id), s));
-    return { sessions, version: msg.version };
+    const present = new Set(msg.sessions.map((s) => s.id));
+    let history: History = new Map([...state.history].filter(([k]) => [...present].some((id) => k.startsWith(`${id}/`))));
+    let pending: ReadonlySet<string> = new Set([...state.pending].filter((id) => present.has(id)));
+    for (const s of msg.sessions) {
+      const prev = state.sessions.get(s.id);
+      const shared = shareSession(prev, s);
+      sessions.set(s.id, shared);
+      ({ history, pending } = recordHistory(history, pending, prev, shared, now));
+    }
+    return { sessions, version: msg.version, history, pending, snapshots: state.snapshots + 1 };
   }
   if (msg.sessions.length === 0) return state;
   const sessions = new Map(state.sessions);
-  for (const s of msg.sessions) sessions.set(s.id, shareSession(state.sessions.get(s.id), s));
-  return { ...state, sessions };
+  let history = state.history;
+  let pending = state.pending;
+  for (const s of msg.sessions) {
+    const prev = state.sessions.get(s.id);
+    const shared = shareSession(prev, s);
+    sessions.set(s.id, shared);
+    ({ history, pending } = recordHistory(history, pending, prev, shared, now));
+  }
+  return { ...state, sessions, history, pending };
 }
 
 /** Active sessions first, then ended; newest start first within each group. */
@@ -229,4 +325,58 @@ export function runningCallElapsed(stale: boolean, cap: number | null): ElapsedM
 
 export function isStale(agent: Agent, sessionEnded: number | null): boolean {
   return sessionEnded !== null || (agent.id !== "main" && (agent.status === "done" || agent.status === "error"));
+}
+
+export interface SpawnInfo {
+  call: ToolCall;
+  /** The agent whose call list contains the spawn call. */
+  parentId: string;
+}
+
+/** Find the tool call that spawned subagent `subId`, searching every agent's call list. */
+export function findSpawn(agents: readonly Agent[], subId: string): SpawnInfo | null {
+  for (const a of agents) {
+    const call = a.calls.find((c) => c.subagent_id === subId);
+    if (call) return { call, parentId: a.id };
+  }
+  return null;
+}
+
+/** Subagents in lane order (Main excluded). */
+export function subagentsOf(agents: readonly Agent[]): Agent[] {
+  return agents.filter((a) => a.id !== "main");
+}
+
+export function findAgent(agents: readonly Agent[], id: string | null): Agent | null {
+  return id === null ? null : (agents.find((a) => a.id === id) ?? null);
+}
+
+export type CallFilter = "all" | "running" | "errors";
+
+/** Newest first; status chip plus case-insensitive text match on tool and summary. */
+export function filterCalls(calls: readonly ToolCall[], status: CallFilter, text: string): ToolCall[] {
+  const q = text.trim().toLowerCase();
+  return calls
+    .filter((c) => (status === "running" ? c.status === "running" : status === "errors" ? c.status === "error" : true))
+    .filter((c) => q === "" || c.tool.toLowerCase().includes(q) || c.summary.toLowerCase().includes(q))
+    .reverse();
+}
+
+export interface HistoryStats {
+  min: number;
+  max: number;
+  current: number;
+  count: number;
+}
+
+export function historyStats(points: readonly HistoryPoint[]): HistoryStats | null {
+  const last = points[points.length - 1];
+  if (!last) return null;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const p of points) {
+    if (p.tokens < min) min = p.tokens;
+    if (p.tokens > max) max = p.tokens;
+  }
+  return { min, max, current: last.tokens, count: points.length };
 }

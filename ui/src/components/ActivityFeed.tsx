@@ -1,5 +1,6 @@
-import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, type ReactNode, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { formatClockSeconds } from "../format";
+import { MiddleText } from "./MiddleText";
 import { agentName, feedItems, feedRowStatus } from "../store";
 import type { Activity } from "../types";
 
@@ -8,7 +9,7 @@ const STATUS_PREFIX: Record<string, string> = { error: "Failed", running: "Runni
 const GLYPH: Record<string, string> = { error: "\u00d7", running: "\u2026" };
 
 /** Wraps at spaces, and allows a break after each "/" inside path-like tokens. */
-function WrapPaths({ text }: { text: string }) {
+export function WrapPaths({ text }: { text: string }) {
   return (
     <>
       {text.split(/(\s+)/).map((tok, i) =>
@@ -37,9 +38,12 @@ interface Props {
   activity: Activity[];
   names: ReadonlyMap<string, string>;
   liveAgents: ReadonlySet<string>;
+  onOpenAgent: (id: string) => void;
+  /** Phase B mounts the filter chips here. */
+  toolbar?: ReactNode;
 }
 
-export const ActivityFeed = memo(function ActivityFeed({ activity, names, liveAgents }: Props) {
+export const ActivityFeed = memo(function ActivityFeed({ activity, names, liveAgents, onOpenAgent, toolbar }: Props) {
   const items = useMemo(() => feedItems(activity), [activity]);
   const scroller = useRef<HTMLOListElement>(null);
   const anchor = useRef<string | null>(null);
@@ -71,8 +75,9 @@ export const ActivityFeed = memo(function ActivityFeed({ activity, names, liveAg
   };
 
   return (
-    <aside className="feed" aria-label="Activity">
-      <h2 className="feed-title">Activity</h2>
+    <aside className="feed panel" aria-label="Activity">
+      <h2 className="feed-title hud-title">Activity</h2>
+      {toolbar ? <div className="feed-toolbar">{toolbar}</div> : null}
       {fresh > 0 ? (
         <button type="button" className="new-pill" onClick={jump}>
           {fresh} new
@@ -84,7 +89,13 @@ export const ActivityFeed = memo(function ActivityFeed({ activity, names, liveAg
           return (
           <li key={key} className={`feed-item st-${status}`}>
             <span className="feed-time tnum">{formatClockSeconds(entry.t)}</span>
-            <span className="feed-agent">{agentName(names, entry.agent_id)}</span>
+            {names.has(entry.agent_id) ? (
+              <button type="button" className="feed-agent" onClick={() => onOpenAgent(entry.agent_id)} title={`${agentName(names, entry.agent_id)}: open details`}>
+                <MiddleText text={agentName(names, entry.agent_id)} />
+              </button>
+            ) : (
+              <span className="feed-agent">{agentName(names, entry.agent_id)}</span>
+            )}
             <span className="feed-text">
               {STATUS_PREFIX[status] ? <span className="sr-only">{STATUS_PREFIX[status]}: </span> : null}
               {GLYPH[status] ? (

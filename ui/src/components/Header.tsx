@@ -1,6 +1,7 @@
 import { memo, useRef, type KeyboardEvent } from "react";
 import { formatClock } from "../format";
 import { tabLabels } from "../store";
+import { Clock } from "./Clock";
 import type { ConnectionState, Session } from "../types";
 
 const CONN_TEXT: Record<ConnectionState, string> = { live: "Live", reconnecting: "Reconnecting", offline: "Offline" };
@@ -36,7 +37,7 @@ export const Header = memo(function Header({ sessions, selectedId, connection, o
 
   return (
     <header className="header">
-      <h1 className="brand">Mission Control</h1>
+      <h1 className="brand"><span className="brand-mark" aria-hidden="true" />Mission Control</h1>
       <div className="tabs" role="tablist" aria-label="Sessions" ref={listRef} onKeyDown={onKeyDown}>
         {sessions.map((s) => {
           const selected = s.id === selectedId;
@@ -61,10 +62,13 @@ export const Header = memo(function Header({ sessions, selectedId, connection, o
           );
         })}
       </div>
+      {/* Phase B: command palette button and shortcuts hint mount here. */}
+      <div className="header-actions" id="header-actions" />
       <div className={`conn conn-${connection}`} role="status">
         <span className="dot" aria-hidden="true" />
         {CONN_TEXT[connection]}
       </div>
+      <Clock />
     </header>
   );
 });

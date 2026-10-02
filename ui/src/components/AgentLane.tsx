@@ -1,9 +1,10 @@
-import { createContext, memo, useContext, useEffect, useState } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useState } from "react";
 import { isStale } from "../store";
 import { plural } from "../format";
 import type { Agent, AgentStatus, ToolCall } from "../types";
 import { ClampText } from "./ClampText";
-import { ContextGauge } from "./ContextGauge";
+import { AnimatedNumber } from "./AnimatedNumber";
+import { Dial } from "./Dial";
 import { Elapsed } from "./Elapsed";
 import { ToolCallRow } from "./ToolCallRow";
 
@@ -19,16 +20,19 @@ const STATUS_TEXT: Record<AgentStatus, string> = {
 
 const VISIBLE_CALLS = 8;
 
+/** Status glyphs so state is never color-only. */
+const GLYPH: Record<AgentStatus, string> = { idle: "-", running: ">", waiting: "?", done: "+", error: "x" };
+
 interface Props {
   agent: Agent;
   /** Epoch seconds when the owning session ended, or null while it is active. */
   sessionEnded: number | null;
   highlighted: boolean;
   onOpenCall: (call: ToolCall) => void;
-  onJump: (agentId: string) => void;
+  onOpenAgent: (agentId: string, trigger?: Element) => void;
 }
 
-export const AgentLane = memo(function AgentLane({ agent, sessionEnded, highlighted, onOpenCall, onJump }: Props) {
+export const AgentLane = memo(function AgentLane({ agent, sessionEnded, highlighted, onOpenCall, onOpenAgent }: Props) {
   const names = useContext(LaneLabels);
   const isMain = agent.id === "main";
   const name = isMain ? agent.label : (names.get(agent.id) ?? agent.label);
@@ -42,27 +46,40 @@ export const AgentLane = memo(function AgentLane({ agent, sessionEnded, highligh
 
   const end = agent.ended ?? sessionEnded;
   const collapsed = finished && !expanded;
-  const cls = `lane status-${agent.status}${isMain ? "" : " sub"}${highlighted ? " flash" : ""}`;
+  const [born] = useState(() => !finished && Date.now() / 1000 - agent.started < 6);
+  const cls = `lane card status-${agent.status}${isMain ? "" : " sub"}${highlighted ? " flash" : ""}${born ? " born" : ""}`;
 
-  const header = (
-    <>
+  const toggle = (): void => setExpanded((x) => !x);
+  const head = (
+    <div
+      className={`lane-head${finished ? " clickable" : ""}`}
+      onClick={finished ? (e) => { if (!(e.target as HTMLElement).closest("button")) toggle(); } : undefined}
+    >
       <span className="edge" aria-hidden="true" />
-      <span className="lane-label">{name}</span>
-      {isMain ? null : <span className="chip chip-sub">subagent</span>}
+      {finished ? (
+        <button type="button" className="chev" aria-expanded={!collapsed} aria-label={`${collapsed ? "Expand" : "Collapse"} ${name}`} onClick={toggle}>
+          {collapsed ? "+" : "-"}
+        </button>
+      ) : (
+        <span className="lane-glyph" aria-hidden="true">{GLYPH[agent.status]}</span>
+      )}
+      <button type="button" className="lane-label" title="Open agent details" onClick={(e) => onOpenAgent(agent.id, e.currentTarget)}>
+        {name}
+      </button>
+      {isMain ? null : <span className="chip chip-sub">Sub</span>}
       <span className="lane-status">{STATUS_TEXT[agent.status]}</span>
       <span className="lane-elapsed">
         <Elapsed start={agent.started} end={end} />
       </span>
-    </>
+      {finished ? <span className="lane-count tnum">{plural(agent.total_calls, "call")}</span> : null}
+    </div>
   );
+  const jumpSpawn = useCallback((id: string): void => onOpenAgent(id), [onOpenAgent]);
 
   if (collapsed) {
     return (
       <section id={`lane-${agent.id}`} className={`${cls} collapsed`} aria-label={`${name} lane`}>
-        <button type="button" className="lane-head lane-toggle" aria-expanded="false" onClick={() => setExpanded(true)}>
-          {header}
-          <span className="lane-count tnum">{plural(agent.total_calls, "call")}</span>
-        </button>
+        {head}
       </section>
     );
   }
@@ -72,17 +89,23 @@ export const AgentLane = memo(function AgentLane({ agent, sessionEnded, highligh
 
   return (
     <section id={`lane-${agent.id}`} className={cls} aria-label={`${name} lane`}>
-      {finished ? (
-        <button type="button" className="lane-head lane-toggle" aria-expanded="true" onClick={() => setExpanded(false)}>
-          {header}
-          <span className="lane-count tnum">{plural(agent.total_calls, "call")}</span>
-        </button>
-      ) : (
-        <div className="lane-head">{header}</div>
-      )}
+      {head}
       <div className="lane-body">
-        <ClampText label="Task" text={agent.task} />
-        <ContextGauge tokens={agent.context_tokens} window={agent.context_window} />
+        <div className="lane-top">
+          <Dial tokens={agent.context_tokens} window={agent.context_window} />
+          <div className="lane-info">
+            <ClampText label="Task" text={agent.task} />
+            <div className="stats">
+              <span className="stat">
+                <span className="hud-label">Calls</span> <AnimatedNumber value={agent.total_calls} />
+              </span>
+              <span className={`stat${agent.errors > 0 ? " tone-err" : ""}`}>
+                <span className="hud-label">Errors</span> <AnimatedNumber value={agent.errors} />
+              </span>
+              {agent.model ? <span className="stat mono muted">{agent.model}</span> : null}
+            </div>
+          </div>
+        </div>
         <div className="tally" aria-label="Tool calls by tool">
           {tools.map(([tool, n]) => (
             <span className="chip tnum" key={tool}>
@@ -102,7 +125,7 @@ export const AgentLane = memo(function AgentLane({ agent, sessionEnded, highligh
                 cap={end}
                 spawnLabel={c.subagent_id ? (names.get(c.subagent_id) ?? null) : null}
                 onOpen={onOpenCall}
-                onJump={onJump}
+                onJump={jumpSpawn}
               />
             ))}
           </ul>
