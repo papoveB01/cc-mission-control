@@ -624,6 +624,20 @@ Each lane shows a radial dial (270° arc) with tokens / window and percent in th
 - **Shortcuts:** `?` shows a shortcuts sheet; `[` / `]` previous/next session; `g` focus topology; `t` toggle timeline; `f` focus feed filter; `e` jump to next error call; `Esc` closes overlays. Shortcuts ignored while typing in an input.
 - **Feed filters:** chips for status (all / errors / running), agent multi-select, tool multi-select, and a text filter; active filters shown with a clear-all. Filters also dim (not hide) non-matching lanes' calls and timeline bars. Filter state persists per browser in `localStorage` (try/catch guarded).
 
+### Feature 5 — agent detail modal (user request)
+Clicking any agent or subagent opens a centered overlay modal with that agent's full details. Triggers: a topology node (click/Enter), a lane card's title/header, a CONTEXT panel row, the agent name in an activity feed row, the compact topology list (< 900 px), and the command palette's agent results (Phase B). Spawn links ("→ general-purpose 2") also open the modal.
+
+Content (from the session data already on the client; no new endpoints):
+- Header: numbered label, agent type, a subagent badge, status (color + glyph + text), elapsed or total duration, model, agent id (monospace, copyable).
+- Context: a large radial dial (tokens / window, percent) and the full context-history sparkline for that agent with compaction ticks and min/max/current values.
+- Task: the full task text (not clamped). For subagents: the result (`result`, last assistant message), scrollable, monospace off.
+- Lineage: for subagents, "Spawned by Main via <tool> call" linking to that call (opens the call drawer); for Main, the list of its subagents (each opens that subagent's modal, replacing the current one).
+- Tools: the tool tally with counts and errors; the full list of this agent's calls (all calls the client has, newest first) with status filter chips (all / running / errors) and a text filter; each row opens the call drawer.
+- Activity: this agent's activity-feed entries, newest first.
+- Footer actions: "Show lane" (closes the modal, scrolls to and highlights the lane), "Close".
+
+Behavior: `role="dialog"`, `aria-modal="true"`, labelled by the header; background inert; focus moves to the modal and is trapped; Esc or backdrop click closes and returns focus to the trigger. Live: it updates in place as new data arrives (calls, status, context). If the agent disappears from the session, the modal shows "This agent is no longer in memory". Opening a call from the modal shows the call drawer above the modal; closing the drawer returns focus to the row inside the modal. Width min(960 px, 100vw − 32 px), height ≤ 90vh with internal scrolling; full-screen sheet below 600 px. Entry animation: 150 ms fade/scale, disabled under reduced motion.
+
 ### Unchanged
 Data contract (9.2/9.3), WS handling, the drawer's detail fetch/inert/focus rules, empty state text, deterministic build and Node 22, server and Python side. No new HTTP endpoints.
 
