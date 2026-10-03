@@ -371,7 +371,9 @@ Client → server: periodic `"ping"` text frames (every 20 s) as keepalive; cont
 ```
 Session {
   id: string               // session_id
-  title: string            // basename of cwd
+  title: string            // basename of the starting folder (project)
+  name: string             // display name: custom title > generated title > title
+  name_source: "custom" | "generated" | "folder"
   cwd: string
   model: string | null
   status: "active" | "ended"
@@ -437,6 +439,8 @@ Activity {
 **Output summary rule.** From `tool_response`, use the first non-empty of: `stdout`, `output`, `content`, `result`, `text`, `message`. Fallback: JSON. Then redact and truncate to `CCMC_MAX_FIELD_CHARS`.
 
 **Call matching.** Match Post events to Pre by `tool_use_id`. If absent, match the most recent running call with the same `tool_name` on that agent. If no match, create the call then complete it.
+
+**Session name.** Each session has a display `name`, resolved in this order: (1) the custom title from the `session_title` field of `SessionStart` / `UserPromptSubmit` (set by `--name`, `/rename`, or a hook); (2) the generated title from the latest `ai-title` record (`aiTitle`) in the main transcript; (3) the basename of the starting folder. `title` remains the starting folder's basename (the project). Names are redacted and capped at 200 characters and update live.
 
 **Unreported calls.** A call blocked before execution (e.g. the path sandbox) fires `PreToolUse` but never a Post event. On `Stop`/`StopFailure`, still-running main-lane calls close as error "No result reported (blocked or cancelled)"; `SubagentStop` does the same for that lane. Hooks are separate HTTP requests, so a late Post for such a call is still applied and the error count corrected.
 
@@ -777,6 +781,7 @@ Reference: `https://code.claude.com/docs/en/hooks`
 - Stale-session rule (`CCMC_STALE_MINUTES`), dev-only `CCMC_DEV_ORIGINS`, nested redaction, static bundle in the wheel, Node 22 pinned.
 - README notes workspace trust for project-level plugin config.
 - Subagents link first through the documented `Agent` `tool_response.agentId` (async_launched/completed), then the meta file, then FIFO.
+- 0.2.2: sessions show Claude Code's session name (custom title from `session_title`, else the transcript's generated `ai-title`), with the folder kept as the project.
 - From real-session acceptance (Claude Code 2.1.287): `PermissionDenied` hook (16 events), unreported-call closing on Stop with late-Post correction, `<task-notification>` prompts kept out of the main task, no lane from a bare `SubagentStop` (internal /compact agent), launcher waits up to 6 s for an open tab to reconnect after a crash restart.
 - v0.2.0: HUD redesign per 11.5, UI only (no server or data-contract changes). Shipped: single dark theme (light theme removed), agent topology graph, tool-call timeline dock (zoom, pan, Follow live, Fit, collapsible and resizable), radial context dials with in-browser context history (lost on reload), agent detail modal opened from any agent, command palette (Ctrl/Cmd+K), keyboard shortcuts, and feed filters persisted per browser.
 - v0.2.1: UI auto-reloads once when the snapshot `version` differs from the build version (sessionStorage guard, manual Reload button if it still differs); timeline text alternative moved into a clipped wrapper so long summaries no longer push the row labels off-screen; injected prompts no longer replace the main task, and typed slash commands (`<command-name>` / `<command-message>` / `<command-args>` tags) show as `/<name> <args>`; the session title keeps the start directory; the dashboard page is served with no-cache headers; a test keeps the UI, Python, pyproject and plugin versions equal.
