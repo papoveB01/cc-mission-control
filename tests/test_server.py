@@ -658,3 +658,26 @@ def test_lifespan_shutdown_keeps_opened_marker(make, tmp_path):
     with TestClient(make(), base_url=BASE) as c:
         assert_empty_200(post(c, ev("SessionStart")))
     assert marker.exists()
+
+
+def test_index_is_no_cache_and_assets_immutable(client):
+    assert client.get("/").headers["cache-control"] == "no-cache"
+    assets = server_mod.STATIC_DIR / "assets"
+    if not assets.is_dir() or not any(assets.iterdir()):
+        pytest.skip("no built bundle")
+    name = next(p.name for p in assets.iterdir() if p.is_file())
+    r = client.get(f"/assets/{name}")
+    assert r.status_code == 200
+    assert r.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert client.get("/assets/missing.js").status_code == 404
+
+
+def test_placeholder_is_no_cache_and_synthetic_assets_immutable(tmp_path, monkeypatch, make):
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets" / "app-abc123.js").write_text("console.log(1)")
+    monkeypatch.setattr(server_mod, "STATIC_DIR", tmp_path)
+    with TestClient(make(), base_url=BASE) as c:
+        r = c.get("/")
+        assert "<!doctype" in r.text.lower() and r.headers["cache-control"] == "no-cache"
+        r = c.get("/assets/app-abc123.js")
+        assert r.headers["cache-control"] == "public, max-age=31536000, immutable"

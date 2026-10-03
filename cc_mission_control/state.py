@@ -24,7 +24,14 @@ CWD_CHARS = 1000
 DEFAULT_SUBAGENT = "general-purpose"
 AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 LINK_CAP = 256
-NOTIFY_TAG = "<task-notification>"
+INJECTED_TAGS = (
+    "task-notification", "cross-session-message", "system-reminder", "local-command-stdout",
+    "local-command-caveat", "command-name", "command-message", "command-args",
+)
+INJECTED_RE = re.compile(r"<(" + "|".join(INJECTED_TAGS) + r")(?=[\s>/])")
+COMMAND_TAGS = ("command-name", "command-message", "command-args")
+COMMAND_RE = {t: re.compile(r"<" + t + r">(.*?)</" + t + r">", re.S) for t in COMMAND_TAGS}
+FROM_NAME_RE = re.compile(r"""from-name=(?:"([^"]*)"|'([^']*)')""")
 TASK_ID_RE = re.compile(r"<task-id>\s*([^<]*?)\s*</task-id>")
 TOOL_ID_RE = re.compile(r"<tool-use-id>\s*([^<]*?)\s*</tool-use-id>")
 UNREPORTED = "No result reported (blocked or cancelled)"
@@ -144,6 +151,7 @@ class Session:
     started: float
     last_event: float
     cwd: str = ""
+    current_cwd: str = ""
     model: Optional[str] = None
     status: str = "active"
     ended: Optional[float] = None
@@ -170,6 +178,7 @@ class Session:
             "id": self.id,
             "title": self.title,
             "cwd": self.cwd,
+            "current_cwd": self.current_cwd,
             "model": self.model,
             "status": self.status,
             "started": self.started,
@@ -415,7 +424,7 @@ class Store:
         s = self._sessions.get(sid)
         if s is None:
             cwd = self._ident(event.get("cwd"), CWD_CHARS) or ""
-            s = Session(id=sid, title=_title(cwd, sid), started=now, last_event=now, cwd=cwd)
+            s = Session(id=sid, title=_title(cwd, sid), started=now, last_event=now, cwd=cwd, current_cwd=cwd)
             s.agents[MAIN] = self._new_agent(MAIN, "Main", now)
             self._sessions[sid] = s
         elif s.status == "ended" and name != "SessionStart":
@@ -425,8 +434,10 @@ class Store:
                 s.status, s.ended, s.end_reason = "active", None, None
         s.last_event = now
         cwd = self._ident(event.get("cwd"), CWD_CHARS)
-        if cwd and cwd != s.cwd:
-            s.cwd, s.title = cwd, _title(cwd, sid)
+        if cwd:
+            s.current_cwd = cwd
+            if name == "SessionStart" or not s.cwd:  # the start directory names the project
+                s.cwd, s.title = cwd, _title(cwd, sid)
         s.transcript_path = _str(event.get("transcript_path")) or s.transcript_path
         handler(self, s, event, self._aid(event.get("agent_id")), now)
         self._changed.add(sid)
@@ -626,13 +637,47 @@ class Store:
         main = s.agents[MAIN]
         prompt = e.get("prompt")
         main.status = "running"
-        if isinstance(prompt, str) and prompt.lstrip().startswith(NOTIFY_TAG):
-            lane = self._notified_lane(s, prompt)
-            text = f"{lane.label} result delivered to Main" if lane else "Background task notification"
-            self._act(s, now, MAIN, "agent", text, "ok")
+        m = INJECTED_RE.match(prompt.lstrip()) if isinstance(prompt, str) else None
+        command = self._slash_command(prompt) if m and m.group(1) in COMMAND_TAGS else None
+        if command is not None:
+            # A typed slash command is real user input: show it as the task, like a normal prompt.
+            main.task = self.redactor.text(command)
+            self._act(s, now, MAIN, "prompt", main.task, "info")
+            return
+        # A command-tag prompt that does not parse falls through to the plain-prompt path below.
+        if m and m.group(1) not in COMMAND_TAGS:
+            tag = m.group(1)
+            if tag == "task-notification":
+                lane = self._notified_lane(s, prompt)
+                text = f"{lane.label} result delivered to Main" if lane else "Background task notification"
+                self._act(s, now, MAIN, "agent", text, "ok")
+            elif tag == "cross-session-message":
+                n = FROM_NAME_RE.search(prompt[: prompt.find(">") if ">" in prompt else 500])
+                sender = self._ident((n.group(1) or n.group(2)) if n else None)
+                self._act(s, now, MAIN, "notice", f"Message from {sender}" if sender else "Cross-session message", "info")
+            else:
+                self._act(s, now, MAIN, "notice", "System message", "info")
             return
         main.task = self.redactor.text(prompt) if isinstance(prompt, str) else main.task
         self._act(s, now, MAIN, "prompt", main.task, "info")
+
+    @staticmethod
+    def _slash_command(prompt: str) -> Optional[str]:
+        """Build "/<name> <args>" from Claude Code's command tags, or None if they do not parse.
+
+        The name comes from <command-name> (else <command-message>); a leading slash is stripped
+        before one is added back. Whitespace is collapsed. Malformed input returns None so the
+        caller treats the prompt as plain text.
+        """
+        found = {t: COMMAND_RE[t].search(prompt) for t in COMMAND_TAGS}
+        name_m = found["command-name"] or found["command-message"]
+        if name_m is None:
+            return None
+        name = " ".join(name_m.group(1).split()).lstrip("/").strip()
+        if not name:
+            return None
+        args = " ".join(found["command-args"].group(1).split()) if found["command-args"] else ""
+        return f"/{name} {args}".strip()
 
     def _notified_lane(self, s: Session, prompt: str) -> Optional[Agent]:
         m = TASK_ID_RE.search(prompt)

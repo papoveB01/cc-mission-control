@@ -182,6 +182,10 @@ code {
 }
 
 .chip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
   display: inline-block;
   padding: 0 6px;
   border: 1px solid var(--line-strong);
@@ -210,6 +214,21 @@ code {
 }
 .st-chip-running {
   border-color: var(--run);
+}
+
+/* Version mismatch banner */
+.update-banner {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 16px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--accent);
+  font: 600 13px/1.4 var(--font-mono);
 }
 
 /* Header */
@@ -605,7 +624,7 @@ code {
 }
 .call-tool {
   flex: none;
-  width: 4.5em;
+  width: 9em;
   font: 600 12px/1.2 var(--font-mono);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -906,9 +925,10 @@ code {
   min-height: 0;
   flex: 1;
 }
+/* Time on the left; agent name above the text so long commands get the full width. */
 .feed-item {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 0 8px;
   padding: 4px 12px;
   border-left: 2px solid transparent;
@@ -916,6 +936,7 @@ code {
   font-size: 13px;
 }
 .feed-time {
+  grid-row: 1 / span 2;
   color: var(--muted);
   font: 500 12px var(--font-mono);
 }
@@ -949,8 +970,12 @@ button.feed-agent:hover {
   white-space: pre;
 }
 .feed-text {
+  grid-column: 2;
   overflow-wrap: break-word;
   min-width: 0;
+}
+.feed-item > .feed-agent {
+  grid-column: 2;
 }
 .st-running {
   border-left-color: var(--run);
@@ -1245,6 +1270,10 @@ kbd {
 }
 .tl-gutter {
   flex: none;
+  position: sticky;
+  left: 0;
+  background: var(--panel);
+  z-index: 1;
 }
 .tl-tick {
   stroke: var(--line-strong);
@@ -1268,6 +1297,10 @@ kbd {
 }
 .tl-label {
   flex: none;
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--panel);
   padding: 0 8px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1630,8 +1663,8 @@ kbd {
   overflow-y: auto;
   border: 1px solid var(--line);
 }
-.m-act-item {
-  grid-template-columns: auto minmax(0, 1fr);
+.m-act-item .feed-time {
+  grid-row: 1;
 }
 
 @keyframes modal-in {
@@ -1758,7 +1791,7 @@ kbd {
     display: none;
   }
   .call-tool {
-    width: 3.6em;
+    width: 6.5em;
   }
   .lane-body {
     padding-right: 8px;

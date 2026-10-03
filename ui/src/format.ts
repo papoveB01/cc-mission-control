@@ -57,3 +57,10 @@ export function gaugePercent(tokens: number, window: number): number {
 export function plural(n: number, noun: string): string {
   return `${n} ${noun}${n === 1 ? "" : "s"}`;
 }
+
+/** Display name for a tool: "mcp__server__action" shows as "action" (the full name goes in a title). */
+export function toolLabel(tool: string): string {
+  if (!tool.startsWith("mcp__")) return tool;
+  const parts = tool.split("__");
+  return parts[parts.length - 1] || tool;
+}

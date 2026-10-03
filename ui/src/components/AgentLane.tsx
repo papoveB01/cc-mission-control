@@ -111,7 +111,7 @@ export const AgentLane = memo(function AgentLane({ agent, sessionEnded, highligh
         </div>
         <div className="tally" aria-label="Tool calls by tool">
           {tools.map(([tool, n]) => (
-            <span className="chip tnum" key={tool}>
+            <span className="chip tnum" key={tool} title={tool}>
               {tool} {n}
             </span>
           ))}

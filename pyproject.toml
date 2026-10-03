@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cc-mission-control"
-version = "0.2.0"
+version = "0.2.1"
 description = "Live dashboard for Claude Code sessions: agents, subagents, context usage, and tool calls in real time."
 readme = "README.md"
 license = "Elastic-2.0"

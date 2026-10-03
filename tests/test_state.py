@@ -1010,3 +1010,124 @@ def test_start_entry_follows_meta_and_tolerates_eviction(store):
         store.ingest(pre("Bash", {"command": str(i)}, f"c{i}"))
     store.apply_subagent_meta(SID, "a1", "again", "p1")  # entry evicted: no error
     assert agent(store, "a1")["task"] == "again"
+
+
+CROSS = (
+    '<cross-session-message from="uds:/tmp/cc-socks/99022.sock" from-name="nytevibe-app-14" '
+    'from-mode="bypass">\nPlease check the deploy.\nSecond line with token=' + "x" * 5 + "\n</cross-session-message>"
+)
+
+
+def test_cross_session_message_is_not_a_task(store):
+    store.ingest(ev("UserPromptSubmit", prompt="fix the build"))
+    store.ingest(ev("Stop"))
+    store.ingest(ev("UserPromptSubmit", prompt="  \n" + CROSS))
+    assert agent(store, "main")["task"] == "fix the build"
+    assert agent(store, "main")["status"] == "running"
+    last = store.session_dict(SID)["activity"][-1]
+    assert (last["kind"], last["text"]) == ("notice", "Message from nytevibe-app-14")
+
+
+def test_cross_session_secret_in_sender_is_masked(store):
+    store.ingest(ev("UserPromptSubmit", prompt='<cross-session-message from-name="' + "n-" + SECRET + '" x="1">hi'))
+    assert A20 not in json.dumps(store.snapshot())
+
+
+@pytest.mark.parametrize("prompt", [
+    "<system-reminder>\nNote: file changed\n</system-reminder>",
+    "<local-command-stdout>ok</local-command-stdout>",
+    "<local-command-caveat>Caveat: ...</local-command-caveat>",
+])
+def test_other_injected_prompts_are_system_messages(store, prompt):
+    store.ingest(ev("UserPromptSubmit", prompt="real task"))
+    store.ingest(ev("UserPromptSubmit", prompt=prompt))
+    assert agent(store, "main")["task"] == "real task"
+    last = store.session_dict(SID)["activity"][-1]
+    assert (last["kind"], last["text"]) == ("notice", "System message")
+    assert agent(store, "main")["status"] == "running"
+
+
+def _task_and_last(store):
+    return agent(store, "main")["task"], store.session_dict(SID)["activity"][-1]
+
+
+def test_slash_command_with_args_becomes_the_task(store):
+    store.ingest(ev("UserPromptSubmit", prompt="old task"))
+    store.ingest(ev("UserPromptSubmit", prompt="<command-name>/review</command-name><command-args>PR 12</command-args>"))
+    task, last = _task_and_last(store)
+    assert task == "/review PR 12"
+    assert (last["kind"], last["text"]) == ("prompt", "/review PR 12")
+    assert agent(store, "main")["status"] == "running"
+
+
+def test_slash_command_normalizes_slash_and_whitespace(store):
+    store.ingest(ev("UserPromptSubmit", prompt="<command-message>review</command-message>\n<command-name>  //review </command-name>\n<command-args>  PR\n  12   fast </command-args>"))
+    assert _task_and_last(store)[0] == "/review PR 12 fast"
+
+
+def test_slash_command_without_args(store):
+    store.ingest(ev("UserPromptSubmit", prompt="<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args></command-args>"))
+    assert _task_and_last(store)[0] == "/compact"
+
+
+def test_command_message_only_prompt(store):
+    store.ingest(ev("UserPromptSubmit", prompt="<command-message>init</command-message>"))
+    task, last = _task_and_last(store)
+    assert task == "/init"
+    assert last["kind"] == "prompt"
+
+
+@pytest.mark.parametrize("prompt", [
+    "<command-name>/review",
+    "<command-args>PR 12</command-args>",
+    "<command-name>  </command-name>",
+    "<command-name>/x<command-args>y",
+])
+def test_malformed_slash_command_is_a_plain_prompt(store, prompt):
+    store.ingest(ev("UserPromptSubmit", prompt=prompt))
+    task, last = _task_and_last(store)
+    assert task == prompt
+    assert last["kind"] == "prompt"
+
+
+def test_slash_command_args_are_redacted_and_capped(store):
+    store.ingest(ev("UserPromptSubmit", prompt="<command-name>/run</command-name><command-args>token=" + SECRET + " " + "z" * 20000 + "</command-args>"))
+    task, _ = _task_and_last(store)
+    assert A20 not in task
+    assert len(task) < 20000
+    assert task.startswith("/run ")
+
+
+@pytest.mark.parametrize("prompt", [
+    "please explain the <system-reminder> tag",
+    "<system-reminders-are-cool>",
+    "<div>hello</div>",
+    "<command-namespace>x",
+])
+def test_prompt_with_lookalike_tag_stays_a_task(store, prompt):
+    store.ingest(ev("UserPromptSubmit", prompt=prompt))
+    assert agent(store, "main")["task"] == prompt
+    assert store.session_dict(SID)["activity"][-1]["kind"] == "prompt"
+
+
+def test_title_keeps_start_directory(store):
+    store.ingest(ev("SessionStart", cwd="/Users/u/dev/nytevibe_app"))
+    store.ingest(pre("Bash", {"command": "ls"}, "t1", cwd="/Users/u/dev/nytevibe_app/backend"))
+    s = store.session_dict(SID)
+    assert s["title"] == "nytevibe_app" and s["cwd"] == "/Users/u/dev/nytevibe_app"
+    assert s["current_cwd"] == "/Users/u/dev/nytevibe_app/backend"
+
+
+def test_session_start_updates_title(store):
+    store.ingest(ev("SessionStart", cwd="/w/one"))
+    store.ingest(ev("Stop", cwd="/w/one/sub"))
+    store.ingest(ev("SessionStart", source="resume", cwd="/w/two"))
+    s = store.session_dict(SID)
+    assert s["title"] == "two" and s["cwd"] == "/w/two" and s["current_cwd"] == "/w/two"
+
+
+def test_late_start_first_cwd_wins(store):
+    store.ingest(pre("Bash", {}, "t1", cwd="/w/proj"))
+    store.ingest(pre("Bash", {}, "t2", cwd="/w/proj/sub"))
+    s = store.session_dict(SID)
+    assert s["title"] == "proj" and s["current_cwd"] == "/w/proj/sub"

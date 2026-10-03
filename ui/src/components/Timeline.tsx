@@ -138,7 +138,10 @@ const CallTable = memo(function CallTable({ agents, names }: { agents: Agent[]; 
   const { rows, total } = useMemo(() => altRows(agents), [agents]);
   const nameOf = (id: string): string => (id === "main" ? "Main" : (names.get(id) ?? id));
   return (
-    <table className="sr-only">
+    // The wrapper must be a div: `overflow` and `clip-path` do not clip a table box, so a table with
+    // long nowrap summaries would otherwise stretch the dock sideways (and push the labels off-screen).
+    <div className="sr-only">
+    <table>
       <caption>
         Tool calls timeline, showing the newest {rows.length} of {total} calls
       </caption>
@@ -154,6 +157,7 @@ const CallTable = memo(function CallTable({ agents, names }: { agents: Agent[]; 
         ))}
       </tbody>
     </table>
+    </div>
   );
 });
 

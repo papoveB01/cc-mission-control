@@ -12,6 +12,7 @@ import { Palette } from "./components/Palette";
 import { Panel } from "./components/Panel";
 import { ShortcutsSheet } from "./components/ShortcutsSheet";
 import { Telemetry } from "./components/Telemetry";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { Timeline, type Reveal, type TimelineInfo } from "./components/Timeline";
 import { Topology } from "./components/Topology";
 import { defaultDock, loadDock, saveDock, type DockState } from "./dock";
@@ -361,6 +362,7 @@ export function App() {
 
   return (
     <>
+      <UpdateBanner serverVersion={state.version} />
       <div ref={appRoot}>
         <Header sessions={ordered} selectedId={selectedId} connection={connection} onSelect={onSelect} actions={headerActions} />
         {session ? <Telemetry session={session} /> : null}

@@ -25,6 +25,18 @@ from .transcript import TranscriptWatcher
 log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+NO_CACHE = {"Cache-Control": "no-cache"}
+IMMUTABLE = "public, max-age=31536000, immutable"
+
+
+class ImmutableStaticFiles(StaticFiles):
+    """Hashed bundle files never change under the same name, so browsers may cache them forever."""
+
+    async def get_response(self, path: str, scope: Any) -> Response:
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            response.headers["Cache-Control"] = IMMUTABLE
+        return response
 BROADCAST_INTERVAL = 0.15
 HOUSEKEEPING_INTERVAL = 30.0
 SEND_TIMEOUT = 1.0
@@ -347,11 +359,11 @@ def create_app(
     async def index() -> Response:
         page = STATIC_DIR / "index.html"
         if page.is_file():
-            return HTMLResponse(page.read_text(encoding="utf-8"))
-        return HTMLResponse(PLACEHOLDER)
+            return HTMLResponse(page.read_text(encoding="utf-8"), headers=NO_CACHE)
+        return HTMLResponse(PLACEHOLDER, headers=NO_CACHE)
 
     if (STATIC_DIR / "assets").is_dir():
-        app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
+        app.mount("/assets", ImmutableStaticFiles(directory=STATIC_DIR / "assets"), name="assets")
 
     app.add_middleware(GuardMiddleware, config=config)
     return app

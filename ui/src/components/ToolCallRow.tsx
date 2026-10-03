@@ -1,4 +1,5 @@
 import { memo } from "react";
+import { toolLabel } from "../format";
 import { runningCallElapsed } from "../store";
 import type { ToolCall } from "../types";
 import { Elapsed } from "./Elapsed";
@@ -29,7 +30,7 @@ export const ToolCallRow = memo(function ToolCallRow({ call, spawnLabel, stale, 
       <button type="button" className="call-main" onClick={(e) => onOpen(call, e.currentTarget)} data-call-id={call.id}>
         <span className={`dot dot-${running && stale ? "stale" : call.status}`} aria-hidden="true" />
         <span className="sr-only">{running && stale ? "interrupted" : STATUS_TEXT[call.status]}: </span>
-        <span className="call-tool">{call.tool}</span>
+        <span className="call-tool" title={call.tool}>{toolLabel(call.tool)}</span>
         <span className={`call-summary${mono ? " mono" : ""}`}>{call.summary}</span>
         <span className="call-time">
           {mode === null ? (

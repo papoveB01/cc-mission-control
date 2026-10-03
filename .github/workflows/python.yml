@@ -98,8 +98,14 @@ jobs:
           m = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M)
           py_version = m.group(1) if m else None
           plugin_version = docs.get(".claude-plugin/plugin.json", {}).get("version")
-          if not (plugin_version == py_version == __version__):
-              errors.append(f"version mismatch: plugin.json={plugin_version} pyproject={py_version} __version__={__version__}")
+          try:
+              with open("ui/package.json", encoding="utf-8") as f:
+                  ui_version = json.load(f).get("version")
+          except Exception as e:
+              ui_version = None
+              errors.append(f"ui/package.json: {e}")
+          if not (plugin_version == py_version == __version__ == ui_version):
+              errors.append(f"version mismatch: plugin.json={plugin_version} pyproject={py_version} __version__={__version__} ui/package.json={ui_version}")
 
           if errors:
               for e in errors:

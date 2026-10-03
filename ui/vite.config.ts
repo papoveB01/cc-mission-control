@@ -1,10 +1,13 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import pkg from "./package.json" with { type: "json" };
 
 const BACKEND = "http://127.0.0.1:4317";
 
 export default defineConfig({
   base: "/",
+  // The build version comes from package.json, so the output stays deterministic.
+  define: { __UI_VERSION__: JSON.stringify(pkg.version) },
   plugins: [react()],
   build: {
     outDir: "../cc_mission_control/static",
