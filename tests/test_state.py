@@ -1131,3 +1131,60 @@ def test_late_start_first_cwd_wins(store):
     store.ingest(pre("Bash", {}, "t2", cwd="/w/proj/sub"))
     s = store.session_dict(SID)
     assert s["title"] == "proj" and s["current_cwd"] == "/w/proj/sub"
+
+
+# ---- session names --------------------------------------------------------
+
+def test_name_precedence_and_source(store):
+    store.ingest(ev("SessionStart", cwd="/w/proj"))
+    s = store.session_dict(SID)
+    assert (s["name"], s["name_source"], s["title"]) == ("proj", "folder", "proj")
+    assert store.set_ai_title(SID, "Generated name") is True
+    s = store.session_dict(SID)
+    assert (s["name"], s["name_source"]) == ("Generated name", "generated")
+    assert store.set_custom_title(SID, "Custom name") is True
+    s = store.session_dict(SID)
+    assert (s["name"], s["name_source"], s["title"]) == ("Custom name", "custom", "proj")
+    store.set_ai_title(SID, "Even newer")
+    assert store.session_dict(SID)["name"] == "Custom name"
+
+
+def test_session_title_on_both_events(store):
+    store.ingest(ev("SessionStart", cwd="/w/proj", session_title="From start"))
+    assert store.session_dict(SID)["name"] == "From start"
+    store.ingest(ev("UserPromptSubmit", prompt="hi", session_title="Renamed"))
+    assert store.session_dict(SID)["name"] == "Renamed"
+    store.ingest(ev("UserPromptSubmit", prompt="again"))  # absent: unchanged
+    store.ingest(ev("UserPromptSubmit", prompt="again", session_title=""))  # empty: ignored
+    store.ingest(ev("UserPromptSubmit", prompt="again", session_title=5))
+    s = store.session_dict(SID)
+    assert (s["name"], s["name_source"]) == ("Renamed", "custom")
+
+
+def test_set_title_marks_changed_only_on_change(store):
+    store.ingest(ev("SessionStart"))
+    store.pop_changed()
+    assert store.set_ai_title(SID, "T") is True
+    assert store.pop_changed() == {SID}
+    assert store.set_ai_title(SID, "T") is False
+    assert store.pop_changed() == set()
+    assert store.set_ai_title("nosession", "T") is False
+    assert store.set_ai_title(SID, "  \n ") is False
+    assert store.set_custom_title(SID, None) is False
+
+
+def test_name_redacted_capped_and_no_activity(store):
+    store.ingest(ev("SessionStart"))
+    before = len(store.session_dict(SID)["activity"])
+    store.set_ai_title(SID, "k\x07\nx " + SECRET + "y" * 400)
+    n = store.session_dict(SID)["name"]
+    assert A20 not in n and len(n) <= 200 and "\n" not in n and "\x07" not in n
+    store.ingest(ev("UserPromptSubmit", prompt="p", session_title="c-" + SECRET))
+    assert A20 not in json.dumps(store.snapshot())
+    assert len(store.session_dict(SID)["activity"]) == before + 1  # only the prompt entry
+
+
+def test_name_strips_bidi_and_invisible_characters(store):
+    store.ingest(ev("SessionStart"))
+    store.set_ai_title(SID, "ab‮c​d⁦e﻿f g‏h")
+    assert store.session_dict(SID)["name"] == "abcdef gh"

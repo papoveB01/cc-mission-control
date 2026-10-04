@@ -148,7 +148,7 @@ describe("tabLabels", () => {
     const labels = tabLabels([
       session("u", { title: "solo" }),
       session("d1", { title: "dup" }),
-      session("d2", { title: "dup" }),
+      session("d2", { title: "dup", started: 220 }),
       session("e", { title: "old", status: "ended" }),
     ]);
     expect(labels.get("u")).toBe("solo");

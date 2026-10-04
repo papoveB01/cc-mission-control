@@ -1,6 +1,6 @@
 {
   "name": "cc-mission-control",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Live dashboard for Claude Code sessions: agents, subagents, context usage, and tool calls in real time.",
   "author": {
     "name": "Papove Bombando Mfuana",

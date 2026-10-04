@@ -653,3 +653,104 @@ def test_watcher_short_aid_skips_loose_patterns(env):
     env.wclock.advance(5)
     env.w.poll()
     assert env.agent("abc123")["context_tokens"] == 3
+
+
+# ---- session names --------------------------------------------------------
+
+def name(env):
+    s = env.store.session_dict(SID)
+    return s["name"], s["name_source"], s["title"]
+
+
+def test_ai_title_latest_wins_and_folder_fallback(env):
+    assert name(env) == ("demo", "folder", "demo")
+    write(env.main, {"type": "ai-title", "aiTitle": "First idea"}, asst(inp=1), {"type": "ai-title", "aiTitle": "Refined idea"})
+    assert env.w.poll() == {SID}
+    assert name(env) == ("Refined idea", "generated", "demo")
+    env.store.pop_changed()
+    write(env.main, {"type": "ai-title", "aiTitle": "Refined idea"}, mode="a")
+    env.w.poll()
+    assert env.store.pop_changed() == set()  # same title: not a change
+    write(env.main, {"type": "ai-title", "aiTitle": "Third"}, mode="a")
+    env.w.poll()
+    assert name(env)[0] == "Third"
+
+
+def test_custom_title_record_beats_ai_title(env):
+    write(env.main, {"type": "custom-title", "customTitle": "My name"}, {"type": "ai-title", "aiTitle": "Gen"})
+    env.w.poll()
+    assert name(env) == ("My name", "custom", "demo")
+
+
+def test_backward_scan_finds_title_before_tail_window_once(env, monkeypatch):
+    from cc_mission_control import transcript as tr
+    write(env.main, {"type": "ai-title", "aiTitle": "Old but gold"})
+    pad = line(asst(inp=1, extra="x" * 5000))
+    write(env.main, *([pad] * 500), mode="a")  # ~2.5 MB, pushing the title out of the 2 MB window
+    calls = []
+    real = tr.scan_titles
+    monkeypatch.setattr(tr, "scan_titles", lambda *a, **k: calls.append(1) or real(*a, **k))
+    env.w.poll()
+    assert name(env)[:2] == ("Old but gold", "generated")
+    assert len(calls) == 1
+    write(env.main, asst(inp=2), mode="a")
+    env.w.poll()
+    assert len(calls) == 1
+
+
+def test_no_backward_scan_when_tail_has_both_titles(env, monkeypatch):
+    from cc_mission_control import transcript as tr
+    pad = line(asst(inp=1, extra="x" * 5000))
+    write(env.main, *([pad] * 500), {"type": "custom-title", "customTitle": "Mine"}, {"type": "ai-title", "aiTitle": "Recent"})
+    monkeypatch.setattr(tr, "scan_titles", lambda *a, **k: pytest.fail("should not scan"))
+    env.w.poll()
+    assert name(env)[:2] == ("Mine", "custom")
+
+
+def test_scan_titles_ignores_partial_first_line_and_junk(tmp_path):
+    from cc_mission_control.transcript import scan_titles
+    p = tmp_path / "t.jsonl"
+    write(p, {"type": "ai-title", "aiTitle": "cut"}, "not json ai-title\n", {"type": "ai-title", "aiTitle": "kept"}, {"type": "user"})
+    assert scan_titles(str(p)) == ("kept", None)
+    assert scan_titles(str(p), max_bytes=len(line({"type": "user"})) + 20)[0] is None
+    assert scan_titles(str(tmp_path / "missing")) == (None, None)
+
+
+def test_title_with_secret_is_masked_and_flattened(env):
+    secret = "sk-" + "ant-api03-" + "a1B2c3D4e5F6g7H8i9J0" * 2
+    write(env.main, {"type": "ai-title", "aiTitle": "Fix\nthe\tbug with " + secret + " " + "z" * 300})
+    env.w.poll()
+    n = env.store.session_dict(SID)["name"]
+    assert "a1B2c3D4e5F6" not in n and "\n" not in n and "\t" not in n and len(n) <= 200
+    assert n.startswith("Fix the bug with ")
+
+
+def test_custom_title_before_window_with_ai_title_inside(env):
+    write(env.main, {"type": "custom-title", "customTitle": "Named by user"})
+    pad = line(asst(inp=1, extra="x" * 5000))
+    write(env.main, *([pad] * 500), {"type": "ai-title", "aiTitle": "Generated"}, mode="a")
+    env.w.poll()
+    assert name(env)[:2] == ("Named by user", "custom")
+    assert env.store._sessions[SID].ai_title == "Generated"
+
+
+@pytest.mark.parametrize("pad_lines", [0, 1, 40, 52, 53, 120, 410])
+def test_scan_titles_distance_from_end(tmp_path, pad_lines):
+    from cc_mission_control.transcript import scan_titles
+    p = tmp_path / "t.jsonl"
+    pad = line({"type": "user", "text": "p" * 4999})  # ~5 KB per line, so 256 KB is ~52 lines
+    write(p, {"type": "ai-title", "aiTitle": "old"}, *([pad] * 3), {"type": "custom-title", "customTitle": "cust"},
+          {"type": "ai-title", "aiTitle": "new"}, *([pad] * pad_lines))
+    assert scan_titles(str(p)) == ("new", "cust")
+
+
+def test_scan_titles_respects_budget_and_line_across_chunks(tmp_path):
+    from cc_mission_control.transcript import scan_titles
+    p = tmp_path / "t.jsonl"
+    big = {"type": "ai-title", "aiTitle": "T" * 300_000}  # one line spanning several chunks
+    write(p, big, {"type": "user"})
+    assert scan_titles(str(p))[0] == "T" * 300_000
+    pad = line({"type": "user", "text": "p" * 4999})
+    write(p, {"type": "ai-title", "aiTitle": "too far"}, *([pad] * 100))
+    assert scan_titles(str(p), max_bytes=200_000) == (None, None)
+    assert scan_titles(str(p), max_bytes=2_000_000)[0] == "too far"

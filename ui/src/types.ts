@@ -46,9 +46,15 @@ export interface Activity {
   status: ActivityStatus;
 }
 
+export type NameSource = "custom" | "generated" | "folder";
+
 export interface Session {
   id: string;
+  /** Project folder basename. */
   title: string;
+  /** Display name (custom title, else generated title, else folder). Absent on older servers. */
+  name?: string;
+  name_source?: NameSource;
   cwd: string;
   model: string | null;
   status: "active" | "ended";

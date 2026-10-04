@@ -24,6 +24,8 @@ META_MAX_BYTES = 1_000_000
 SAFE_AID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 LOOSE_MIN_AID = 8  # shorter ids only get the exact `agent-<id>*` pattern
 MAX_BACKOFF = 30.0
+TITLE_SCAN_BYTES = 4_000_000
+TITLE_CHUNK_BYTES = 256 * 1024
 
 
 @dataclass
@@ -53,6 +55,59 @@ def usage_from_entry(entry: dict, *, main: bool) -> Optional[Usage]:
     return Usage(tokens, model)
 
 
+def title_from_entry(entry: Any) -> Tuple[Optional[str], Optional[str]]:
+    """(ai title, custom title) carried by one transcript record."""
+    if not isinstance(entry, dict):
+        return None, None
+    kind = entry.get("type")
+    if kind == "ai-title":
+        return _opt_str(entry.get("aiTitle")), None
+    if kind == "custom-title":
+        return None, _opt_str(entry.get("customTitle"))
+    return None, None
+
+
+def latest_titles(entries: List[dict]) -> Tuple[Optional[str], Optional[str]]:
+    ai = custom = None
+    for entry in entries:
+        a, c = title_from_entry(entry)
+        ai, custom = a or ai, c or custom
+    return ai, custom
+
+
+def scan_titles(path: str, max_bytes: int = TITLE_SCAN_BYTES) -> Tuple[Optional[str], Optional[str]]:
+    """Last ai-title / custom-title in the final `max_bytes` of a file, read backwards in chunks."""
+    ai = custom = None
+    try:
+        with open(path, "rb") as f:
+            pos = f.seek(0, os.SEEK_END)
+            budget = max_bytes
+            carry = b""  # start of the line that spans into the chunk read after this one
+            while pos > 0 and budget > 0 and not (ai and custom):
+                n = min(TITLE_CHUNK_BYTES, pos, budget)
+                pos -= n
+                budget -= n
+                f.seek(pos)
+                lines = (f.read(n) + carry).split(b"\n")
+                carry = b""
+                if pos > 0:
+                    if budget > 0:
+                        carry = lines[0]  # may be cut off; completed by the next chunk
+                    lines = lines[1:]
+                for raw in reversed(lines):
+                    if b"ai-title" not in raw and b"custom-title" not in raw:
+                        continue
+                    try:
+                        entry = json.loads(raw.decode("utf-8", errors="replace"))
+                    except ValueError:
+                        continue
+                    a, c = title_from_entry(entry)
+                    ai, custom = ai or a, custom or c
+    except OSError:
+        pass
+    return ai, custom
+
+
 class Tail:
     """Incremental JSONL reader for one file (SPEC 5.3)."""
 
@@ -69,6 +124,8 @@ class Tail:
         self._offset: Optional[int] = None  # None until the first successful stat
         self._buf = b""
         self._skip_partial = False
+        self.skipped_head = False  # the first read started mid-file
+        self.title_checked = False
 
     def read(self) -> Tuple[List[dict], bool]:
         """New parsed entries and whether any bytes were read. Never raises."""
@@ -88,6 +145,7 @@ class Tail:
             if size > self.start_tail_bytes:
                 self._offset = size - self.start_tail_bytes
                 self._skip_partial = True
+                self.skipped_head = True
         elif size < self._offset:
             self._offset, self._buf, self._skip_partial = 0, b"", False
         if size == self._offset:
@@ -257,6 +315,17 @@ class TranscriptWatcher:
         if grew:
             self.store.touch(sid)
             changed.add(sid)
+        if is_main:
+            ai, custom = latest_titles(entries)
+            if tail.skipped_head and not tail.title_checked:
+                tail.title_checked = True
+                if ai is None or custom is None:  # a title may sit before the tail window
+                    back_ai, back_custom = scan_titles(path)
+                    ai, custom = ai or back_ai, custom or back_custom
+            if ai and self.store.set_ai_title(sid, ai):
+                changed.add(sid)
+            if custom and self.store.set_custom_title(sid, custom):
+                changed.add(sid)
         latest: Optional[Usage] = None
         for entry in entries:
             usage = usage_from_entry(entry, main=is_main)

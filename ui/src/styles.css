@@ -333,6 +333,10 @@ code {
   padding: 6px 12px;
   box-shadow: inset -1px -1px 0 var(--line);
 }
+/* The session name gets two columns of room. */
+.tele-cell:first-child {
+  grid-column: span 2;
+}
 .tele-value {
   font: 500 14px/1.3 var(--font-mono);
   overflow: hidden;
@@ -1802,7 +1806,9 @@ kbd {
   .telemetry {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .tele-cell:last-child:nth-child(odd) {
+  /* The session name spans the row; the remaining cells pair up, with the last one spanning if odd. */
+  .tele-cell:first-child,
+  .tele-cell:last-child:nth-child(even) {
     grid-column: 1 / -1;
   }
   .modal {

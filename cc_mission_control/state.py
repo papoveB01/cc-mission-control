@@ -152,6 +152,8 @@ class Session:
     last_event: float
     cwd: str = ""
     current_cwd: str = ""
+    custom_title: Optional[str] = None
+    ai_title: Optional[str] = None
     model: Optional[str] = None
     status: str = "active"
     ended: Optional[float] = None
@@ -177,6 +179,8 @@ class Session:
         return {
             "id": self.id,
             "title": self.title,
+            "name": self.custom_title or self.ai_title or self.title,
+            "name_source": "custom" if self.custom_title else "generated" if self.ai_title else "folder",
             "cwd": self.cwd,
             "current_cwd": self.current_cwd,
             "model": self.model,
@@ -188,6 +192,11 @@ class Session:
             "agents": [a.to_dict() for a in self.ordered_agents()],
             "activity": list(self.activity),
         }
+
+
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
+# bidi controls and zero-width characters can disguise a name, so they are dropped outright
+_INVISIBLE_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
 
 
 def _norm_agent(raw: Any) -> str:
@@ -381,6 +390,30 @@ class Store:
         self._link_call(s, tool_use_id, agent.id)
         if retry is not None:
             self._fifo(s, retry)
+
+    def set_custom_title(self, session_id: str, title: Any) -> bool:
+        """Custom session name (--name, /rename, hook). Returns True if it changed."""
+        return self._set_name(session_id, "custom_title", title)
+
+    def set_ai_title(self, session_id: str, title: Any) -> bool:
+        """Generated session name from the transcript. Returns True if it changed."""
+        return self._set_name(session_id, "ai_title", title)
+
+    def _set_name(self, session_id: str, attr: str, title: Any) -> bool:
+        with self._lock:
+            s = self._sessions.get(session_id)
+            name = self._name(title)
+            if s is None or name is None or getattr(s, attr) == name:
+                return False
+            setattr(s, attr, name)
+            self._changed.add(session_id)
+            return True
+
+    def _name(self, value: Any) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        flat = _CONTROL_RE.sub(" ", _INVISIBLE_RE.sub("", value)).strip()
+        return self._ident(flat) if flat else None
 
     def touch(self, session_id: str) -> None:
         with self._lock:
@@ -621,6 +654,7 @@ class Store:
     # ---- handlers ---------------------------------------------------------
 
     def _h_session_start(self, s: Session, e: dict, aid: str, now: float) -> None:
+        self._custom_from_event(s, e)
         if s.status == "ended":
             s.status, s.ended, s.end_reason = "active", None, None
         main = s.agents[MAIN]
@@ -633,7 +667,13 @@ class Store:
             self.set_context(s.id, MAIN, tokens, None)
         self._act(s, now, MAIN, "session", f"Session started ({s.source or 'startup'})", "info")
 
+    def _custom_from_event(self, s: Session, e: dict) -> None:
+        name = self._name(e.get("session_title"))
+        if name:  # absent or empty never clears: the docs only send it when a custom title exists
+            s.custom_title = name
+
     def _h_prompt(self, s: Session, e: dict, aid: str, now: float) -> None:
+        self._custom_from_event(s, e)
         main = s.agents[MAIN]
         prompt = e.get("prompt")
         main.status = "running"

@@ -1,5 +1,5 @@
 import { rankScored } from "./fuzzy";
-import { tabLabels } from "./store";
+import { sessionName, tabLabels } from "./store";
 import type { Session, ToolCall } from "./types";
 
 export type ActionId = "timeline" | "follow" | "fit" | "clear-filters" | "next-error" | "shortcuts";
@@ -14,6 +14,8 @@ export interface PaletteItem {
   id: string;
   label: string;
   detail: string;
+  /** Text matched against the query when it differs from the label. */
+  search?: string;
   target: PaletteTarget;
 }
 
@@ -52,14 +54,15 @@ export function recentCalls(session: Pick<Session, "agents"> | null, limit = REC
 /** Grouped, ranked palette results. Empty groups are dropped. */
 export function buildResults(query: string, ctx: PaletteContext): PaletteGroup[] {
   const session = ctx.sessions.find((s) => s.id === ctx.selectedId) ?? null;
-  const labels = tabLabels(ctx.sessions);
+  const labels = tabLabels(ctx.sessions, Infinity);
   const limit = query.trim() === "" ? 4 : GROUP_LIMIT;
 
   const actions: PaletteItem[] = ACTIONS.map((a) => ({ id: `action:${a.id}`, label: a.label, detail: a.detail, target: { type: "action", id: a.id } }));
   const sessions: PaletteItem[] = ctx.sessions.map((s) => ({
     id: `session:${s.id}`,
-    label: labels.get(s.id) ?? s.title,
-    detail: s.status === "active" ? "Active" : "Ended",
+    label: labels.get(s.id) ?? sessionName(s),
+    detail: `${s.title} \u00b7 ${s.status === "active" ? "Active" : "Ended"}`,
+    search: `${sessionName(s)} ${s.title}`,
     target: { type: "session", id: s.id },
   }));
   const agents: PaletteItem[] = (session?.agents ?? []).map((a) => {
@@ -75,7 +78,7 @@ export function buildResults(query: string, ctx: PaletteContext): PaletteGroup[]
 
   const empty = query.trim() === "";
   const build = (heading: string, items: PaletteItem[], limit: number): { group: PaletteGroup; best: number } => {
-    const ranked = rankScored(items, query, (i) => i.label).slice(0, limit);
+    const ranked = rankScored(items, query, (i) => i.search ?? i.label).slice(0, limit);
     return { group: { heading, items: ranked.map((r) => r.item) }, best: ranked[0]?.score ?? -Infinity };
   };
   const built = [

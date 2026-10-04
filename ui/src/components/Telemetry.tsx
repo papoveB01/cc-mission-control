@@ -1,6 +1,7 @@
 import { memo } from "react";
 import { useNow } from "../clock";
 import { formatClock, formatDuration } from "../format";
+import { sessionName } from "../store";
 import type { Session } from "../types";
 import { AnimatedNumber } from "./AnimatedNumber";
 import { Elapsed } from "./Elapsed";
@@ -10,9 +11,9 @@ function LastEvent({ at }: { at: number }) {
   return <span className="tnum">{formatDuration(Math.max(0, now - at * 1000))} ago</span>;
 }
 
-function Cell({ label, children, tone }: { label: string; children: React.ReactNode; tone?: "err" }) {
+function Cell({ label, children, tone, title }: { label: string; children: React.ReactNode; tone?: "err"; title?: string }) {
   return (
-    <div className={`tele-cell${tone ? ` tone-${tone}` : ""}`}>
+    <div className={`tele-cell${tone ? ` tone-${tone}` : ""}`} title={title}>
       <span className="hud-label">{label}</span>
       <span className="tele-value">{children}</span>
     </div>
@@ -25,7 +26,12 @@ export const Telemetry = memo(function Telemetry({ session }: { session: Session
   const errors = session.agents.reduce((n, a) => n + a.errors, 0);
   return (
     <section className="telemetry" aria-label="Session telemetry">
-      <Cell label="Project">{session.title}</Cell>
+      <Cell label="Session" title={sessionName(session)}>
+        {sessionName(session)}
+      </Cell>
+      <Cell label="Project" title={session.cwd || session.title}>
+        {session.title}
+      </Cell>
       <Cell label="Model">{session.model ?? "unknown"}</Cell>
       <Cell label="Started">
         <span className="tnum">{formatClock(session.started)}</span>

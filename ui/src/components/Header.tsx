@@ -1,6 +1,5 @@
 import { memo, useRef, type KeyboardEvent, type ReactNode } from "react";
-import { formatClock } from "../format";
-import { tabLabels } from "../store";
+import { sessionName, tabLabels, tabTooltip } from "../store";
 import { Clock } from "./Clock";
 import type { ConnectionState, Session } from "../types";
 
@@ -55,10 +54,10 @@ export const Header = memo(function Header({ sessions, selectedId, connection, o
               tabIndex={selected ? 0 : -1}
               className={`tab${s.status === "ended" ? " ended" : ""}`}
               onClick={() => onSelect(s.id)}
-              title={`${s.cwd || s.title} \u00b7 started ${formatClock(s.started)}`}
+              title={tabTooltip(s)}
             >
               {s.status === "active" ? <span className="dot dot-live" aria-hidden="true" /> : null}
-              <span className="tab-title">{labels.get(s.id) ?? s.title}</span>
+              <span className="tab-title">{labels.get(s.id) ?? sessionName(s)}</span>
               {s.status === "ended" ? <span className="sr-only"> (ended)</span> : null}
             </button>
           );

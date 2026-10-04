@@ -440,7 +440,7 @@ Activity {
 
 **Call matching.** Match Post events to Pre by `tool_use_id`. If absent, match the most recent running call with the same `tool_name` on that agent. If no match, create the call then complete it.
 
-**Session name.** Each session has a display `name`, resolved in this order: (1) the custom title from the `session_title` field of `SessionStart` / `UserPromptSubmit` (set by `--name`, `/rename`, or a hook); (2) the generated title from the latest `ai-title` record (`aiTitle`) in the main transcript; (3) the basename of the starting folder. `title` remains the starting folder's basename (the project). Names are redacted and capped at 200 characters and update live.
+**Session name.** Each session has a display `name`, resolved in this order: (1) the custom title from the `session_title` field of `SessionStart` / `UserPromptSubmit` (set by `--name`, `/rename`, or a hook); (2) the generated title from the latest `ai-title` record (`aiTitle`) in the main transcript; (3) the basename of the starting folder. `title` remains the starting folder's basename (the project). Names are stripped of control, bidi and invisible characters, redacted, capped at 200 characters, and update live. An empty or missing `session_title` never clears a custom title already seen (Claude Code only sends the field when a custom title exists).
 
 **Unreported calls.** A call blocked before execution (e.g. the path sandbox) fires `PreToolUse` but never a Post event. On `Stop`/`StopFailure`, still-running main-lane calls close as error "No result reported (blocked or cancelled)"; `SubagentStop` does the same for that lane. Hooks are separate HTTP requests, so a late Post for such a call is still applied and the error count corrected.
 

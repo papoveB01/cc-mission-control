@@ -20,7 +20,7 @@ import { loadFilters, noFilters, pruneFilters, saveFilters, safeStorage, type Fi
 import { scrollBehavior } from "./motion";
 import type { PaletteContext, PaletteItem } from "./palette";
 import { dispatchKey, isTypingTarget, type ShortcutAction } from "./shortcuts";
-import { historyKey, laneNames, liveAgentIds, orderSessions, resolveSelected } from "./store";
+import { DOC_TITLE_NAME_MAX, historyKey, laneNames, sessionName, truncateName, liveAgentIds, orderSessions, resolveSelected } from "./store";
 import type { HistoryPoint } from "./store";
 import { errorCalls, initialTimeline, nextError, timelineReducer } from "./timeline";
 import type { ToolCall } from "./types";
@@ -65,7 +65,7 @@ export function App() {
   useEffect(() => saveFilters(filters), [filters]);
   useEffect(() => saveDock(dock, safeStorage()), [dock]);
 
-  const orderKey = [...state.sessions.values()].map((s) => `${s.id}\u0000${s.status}\u0000${s.title}\u0000${s.started}\u0000${s.cwd}`).join("\u0001");
+  const orderKey = [...state.sessions.values()].map((s) => `${s.id}\u0000${s.status}\u0000${s.title}\u0000${s.name ?? ""}\u0000${s.name_source ?? ""}\u0000${s.started}\u0000${s.cwd}`).join("\u0001");
   // eslint-disable-next-line react-hooks/exhaustive-deps -- Header only reads the fields in orderKey
   const ordered = useMemo(() => orderSessions(state.sessions.values()), [orderKey]);
   const selectedId = resolveSelected(state.sessions, explicit);
@@ -89,6 +89,12 @@ export function App() {
     () => pruneFilters(filters, new Set(agentOptions.map((a) => a.id)), new Set(toolOptions)),
     [filters, agentOptions, toolOptions],
   );
+
+  // The browser tab shows the selected session's name.
+  const docName = session ? sessionName(session) : null;
+  useEffect(() => {
+    document.title = docName ? `${truncateName(docName, DOC_TITLE_NAME_MAX)} \u00b7 Mission Control` : "Mission Control";
+  }, [docName]);
 
   // Overlays that are actually rendered drive inertness, scroll lock and Esc layering.
   const modalShown = modalAgent !== null && session !== null;
