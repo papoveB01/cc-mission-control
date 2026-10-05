@@ -1,7 +1,7 @@
 ---
 title: "cc-mission-control — Product Description and Technical Specification"
 subtitle: "Version 0.1.1 · Build specification for Claude Code"
-author: "E&EL Global Inc. — Papove Bombando Mfuana"
+author: "Papove Bombando Mfuana"
 date: "October 2026"
 ---
 
@@ -56,7 +56,7 @@ Teams that need to govern agent behavior (security review, audit, cost control) 
 | 3 | Backend stack | Python, FastAPI, uvicorn |
 | 4 | Frontend | React + TypeScript (Vite), prebuilt bundle committed to the repo |
 | 5 | Repo visibility | Public |
-| 6 | License | Elastic License 2.0 (licensor: E&EL Global Inc.) |
+| 6 | License | Elastic License 2.0 (licensor: Papove Bombando Mfuana) |
 | 7 | Name | `cc-mission-control`, repo `papoveB01/cc-mission-control`. The repo was built as `papoveB01/cc-mission-control-beta` and renamed at v0.1.0 (GitHub redirects the old URL); all references were updated in one commit |
 
 # 3. Scope
@@ -670,7 +670,7 @@ The event format already supports multiple machines and users.
 
 - **v0.1 (built):** when `CCMC_UPSTREAM_URL` is set, the local server forwards each event, redacted, with two added fields: `machine_id` (first 12 hex chars of SHA-256 of the hostname) and `user` (OS username). Async queue, max 5000; drop when full; never block ingestion.
 - **v0.2 (later):** hosted server reuses the same Store and UI, keyed by `(machine_id, session_id)`; adds token authentication, persistence (SQLite or Postgres), retention policy, and a machine/user filter in the UI.
-- **Commercial line:** offering the hosted version to third parties is reserved to E&EL under the Elastic License 2.0.
+- **Commercial line:** offering the hosted version to third parties is reserved to the licensor under the Elastic License 2.0.
 
 The hook URL never changes: hooks always post to the local server, which relays.
 

@@ -319,7 +319,7 @@ Releases: bump the version in `.claude-plugin/plugin.json`, `pyproject.toml` and
 
 ## License
 
-[Elastic License 2.0](LICENSE). Copyright (c) 2026 E&EL Global Inc., the licensor. In plain language (not a substitute for the license text, see [`NOTICE`](NOTICE)):
+[Elastic License 2.0](LICENSE). Copyright (c) 2026 Papove Bombando Mfuana, the licensor. In plain language (not a substitute for the license text, see [`NOTICE`](NOTICE)):
 
 - You may use, copy, modify and redistribute this software, including inside your company and in your own products.
 - You may not provide it to third parties as a hosted or managed service.

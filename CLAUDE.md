@@ -37,7 +37,7 @@ Event flow: Claude Code → `hooks/hooks.json` → FastAPI server on `127.0.0.1:
 - `plugin.json` `version` must be bumped on every release because Claude Code caches plugins by version.
 - The repo is `papoveB01/cc-mission-control` (renamed from the build repo `cc-mission-control-beta` at v0.1.0) and the plugin ID is `cc-mission-control@papoveb01`.
 - `keys/` holds a local GitHub token and is gitignored. Pushes use it per command via a credential helper, never stored in git config. The `gh` CLI token cannot push to this repo.
-- License is Elastic License 2.0 (licensor E&EL Global Inc.). `LICENSE` is the verbatim upstream text; don't edit it.
+- License is Elastic License 2.0 (licensor Papove Bombando Mfuana). `LICENSE` is the verbatim upstream text; don't edit it.
 
 ## Working model
 
