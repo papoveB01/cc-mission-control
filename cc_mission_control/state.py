@@ -152,6 +152,7 @@ class Session:
     last_event: float
     cwd: str = ""
     current_cwd: str = ""
+    title_source: str = ""  # where cwd/title came from: "start", "transcript" or "event"
     custom_title: Optional[str] = None
     ai_title: Optional[str] = None
     model: Optional[str] = None
@@ -391,6 +392,20 @@ class Store:
         if retry is not None:
             self._fifo(s, retry)
 
+    def set_project_cwd(self, session_id: str, cwd: Any) -> bool:
+        """Project folder read from the transcript head. A SessionStart cwd always wins."""
+        with self._lock:
+            s = self._sessions.get(session_id)
+            cwd = self._ident(cwd, CWD_CHARS)
+            if s is None or not cwd or s.title_source == "start":
+                return False
+            title = _title(cwd, session_id)
+            if (s.cwd, s.title, s.title_source) == (cwd, title, "transcript"):
+                return False
+            s.cwd, s.title, s.title_source = cwd, title, "transcript"
+            self._changed.add(session_id)
+            return True
+
     def set_custom_title(self, session_id: str, title: Any) -> bool:
         """Custom session name (--name, /rename, hook). Returns True if it changed."""
         return self._set_name(session_id, "custom_title", title)
@@ -458,6 +473,7 @@ class Store:
         if s is None:
             cwd = self._ident(event.get("cwd"), CWD_CHARS) or ""
             s = Session(id=sid, title=_title(cwd, sid), started=now, last_event=now, cwd=cwd, current_cwd=cwd)
+            s.title_source = "start" if name == "SessionStart" and cwd else "event" if cwd else ""
             s.agents[MAIN] = self._new_agent(MAIN, "Main", now)
             self._sessions[sid] = s
         elif s.status == "ended" and name != "SessionStart":
@@ -471,6 +487,7 @@ class Store:
             s.current_cwd = cwd
             if name == "SessionStart" or not s.cwd:  # the start directory names the project
                 s.cwd, s.title = cwd, _title(cwd, sid)
+                s.title_source = "start" if name == "SessionStart" else "event"
         s.transcript_path = _str(event.get("transcript_path")) or s.transcript_path
         handler(self, s, event, self._aid(event.get("agent_id")), now)
         self._changed.add(sid)

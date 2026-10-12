@@ -1188,3 +1188,43 @@ def test_name_strips_bidi_and_invisible_characters(store):
     store.ingest(ev("SessionStart"))
     store.set_ai_title(SID, "ab‮c​d⁦e﻿f g‏h")
     assert store.session_dict(SID)["name"] == "abcdef gh"
+
+
+# ---- project folder -------------------------------------------------------
+
+def test_set_project_cwd_for_late_start(store):
+    store.ingest(pre("Bash", {}, "t1", cwd="/x/proj/backend"))
+    assert store.session_dict(SID)["title"] == "backend"
+    store.pop_changed()
+    assert store.set_project_cwd(SID, "/x/proj") is True
+    s = store.session_dict(SID)
+    assert (s["title"], s["cwd"], s["current_cwd"]) == ("proj", "/x/proj", "/x/proj/backend")
+    assert store.pop_changed() == {SID}
+    assert store.set_project_cwd(SID, "/x/proj") is False
+    assert store.pop_changed() == set()
+
+
+def test_session_start_cwd_beats_transcript(store):
+    store.ingest(ev("SessionStart", cwd="/x/app"))
+    assert store.set_project_cwd(SID, "/other/place") is False
+    assert store.session_dict(SID)["title"] == "app"
+    assert store.set_project_cwd("nosession", "/a") is False
+    assert store.set_project_cwd(SID, "") is False
+
+
+def test_session_start_later_overrides_transcript_title(store):
+    store.ingest(pre("Bash", {}, "t1", cwd="/x/proj/backend"))
+    store.set_project_cwd(SID, "/x/proj")
+    store.ingest(ev("SessionStart", source="resume", cwd="/y/other"))
+    assert store.session_dict(SID)["title"] == "other"
+    assert store.set_project_cwd(SID, "/x/proj") is False
+
+
+def test_name_precedence_unaffected_by_project_cwd(store):
+    store.ingest(pre("Bash", {}, "t1", cwd="/x/proj/backend"))
+    store.set_project_cwd(SID, "/x/proj")
+    assert (store.session_dict(SID)["name"], store.session_dict(SID)["name_source"]) == ("proj", "folder")
+    store.set_ai_title(SID, "Gen")
+    store.set_custom_title(SID, "Cust")
+    s = store.session_dict(SID)
+    assert (s["name"], s["name_source"], s["title"]) == ("Cust", "custom", "proj")

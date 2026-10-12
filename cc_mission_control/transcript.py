@@ -26,6 +26,8 @@ LOOSE_MIN_AID = 8  # shorter ids only get the exact `agent-<id>*` pattern
 MAX_BACKOFF = 30.0
 TITLE_SCAN_BYTES = 4_000_000
 TITLE_CHUNK_BYTES = 256 * 1024
+HEAD_BYTES = 64 * 1024
+HEAD_LINES = 200
 
 
 @dataclass
@@ -106,6 +108,31 @@ def scan_titles(path: str, max_bytes: int = TITLE_SCAN_BYTES) -> Tuple[Optional[
     except OSError:
         pass
     return ai, custom
+
+
+def head_cwd(path: str, max_bytes: int = HEAD_BYTES, max_lines: int = HEAD_LINES) -> Tuple[Optional[str], bool]:
+    """First top-level `cwd` in the head of a transcript, and whether the answer is final.
+
+    The first entry with a cwd holds the folder the session started in. The answer is final
+    once a cwd is found or the head is already full (max_bytes or max_lines); a short head
+    may still grow a cwd later. Never raises.
+    """
+    try:
+        with open(path, "rb") as f:
+            data = f.read(max_bytes)
+    except OSError:
+        return None, False
+    for raw in data.split(b"\n")[:max_lines]:
+        if b'"cwd"' not in raw:
+            continue
+        try:
+            entry = json.loads(raw.decode("utf-8", errors="replace"))
+        except ValueError:
+            continue
+        cwd = entry.get("cwd") if isinstance(entry, dict) else None
+        if isinstance(cwd, str) and cwd:
+            return cwd, True
+    return None, len(data) >= max_bytes or data.count(b"\n") >= max_lines
 
 
 class Tail:
@@ -231,6 +258,8 @@ class TranscriptWatcher:
         self._searched: Dict[Tuple[str, str], Tuple[float, float]] = {}
         self._meta_looked: Dict[Tuple[str, str], Tuple[float, float]] = {}
         self._meta_done: Set[Tuple[str, str]] = set()
+        self._head_done: Dict[str, str] = {}  # session id -> main transcript path already scanned
+        self._head_looked: Dict[Tuple[str, str], Tuple[float, float]] = {}  # (session id, path) backoff
 
     def poll(self) -> Set[str]:
         """Read every transcript; returns session ids whose context changed or files grew."""
@@ -250,6 +279,11 @@ class TranscriptWatcher:
             for key in [k for k in table if k not in live]:
                 del table[key]
         self._meta_done &= live
+        sessions = {sid for sid, _ in live}
+        for sid in [k for k in self._head_done if k not in sessions]:
+            del self._head_done[sid]
+        for key in [k for k in self._head_looked if k[0] not in sessions]:
+            del self._head_looked[key]
         seen: Set[Tuple[str, str, str]] = set()
         for sid, aid, path in targets:
             try:
@@ -304,6 +338,16 @@ class TranscriptWatcher:
                 self._apply_meta(sid, aid, main_path, path)
         if not path:
             return
+        hkey = (sid, path)
+        if is_main and self._head_done.get(sid) != path and self._due(self._head_looked, hkey):
+            cwd, final = head_cwd(path)
+            if final:
+                self._head_done[sid] = path
+                self._head_looked.pop(hkey, None)
+            else:  # missing, empty or still short: look again later, with backoff
+                self._miss(self._head_looked, hkey)
+            if cwd and self.store.set_project_cwd(sid, cwd):
+                changed.add(sid)
         tkey = (sid, aid, path)
         seen.add(tkey)
         tail = self._tails.get(tkey)

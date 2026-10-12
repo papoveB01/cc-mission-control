@@ -6,6 +6,8 @@ A Claude Code plugin that opens a live local dashboard for your session. It show
 
 **Quick start:** in Claude Code run `/plugin marketplace add papoveB01/cc-mission-control`, then `/plugin install cc-mission-control@papoveb01`, then start a new session. The dashboard opens at http://127.0.0.1:4317/. Needs Python 3.10+ and [uv](https://docs.astral.sh/uv/) (see Requirements).
 
+**What's new in 0.2.3:** the project folder is read from the transcript when the dashboard joins a session mid-way; licensor attribution updated.
+
 **What's new in 0.2.2:** sessions show Claude Code's session name (the name you set with `/rename`, else the title Claude Code generated), and the folder is kept as the project.
 
 **What's new in 0.2.1:** the dashboard reloads itself once after an update (with a manual button if it still differs), the timeline row-label fix for long sessions, injected prompts (cross-session messages, task notifications) no longer replace the task while typed slash commands show as the task, the session title keeps the folder you started in, and the dashboard page is served with no-cache headers so an open tab picks up the new build.

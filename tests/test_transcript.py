@@ -754,3 +754,101 @@ def test_scan_titles_respects_budget_and_line_across_chunks(tmp_path):
     write(p, {"type": "ai-title", "aiTitle": "too far"}, *([pad] * 100))
     assert scan_titles(str(p), max_bytes=200_000) == (None, None)
     assert scan_titles(str(p), max_bytes=2_000_000)[0] == "too far"
+
+
+# ---- project folder from the transcript head ------------------------------
+
+def test_watcher_reads_project_folder_from_head_once(env, monkeypatch):
+    from cc_mission_control import transcript as tr
+    env.store._sessions.clear()
+    env.store.ingest({"session_id": SID, "transcript_path": str(env.main), "cwd": "/x/proj/backend",
+                      "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_use_id": "t"})
+    write(env.main, {"type": "summary"}, {"type": "user", "cwd": "/x/proj"}, {"type": "user", "cwd": "/x/proj/backend"})
+    calls = []
+    real = tr.head_cwd
+    monkeypatch.setattr(tr, "head_cwd", lambda *a, **k: calls.append(1) or real(*a, **k))
+    assert SID in env.w.poll()
+    s = env.store.session_dict(SID)
+    assert (s["title"], s["current_cwd"]) == ("proj", "/x/proj/backend")
+    write(env.main, {"type": "user", "cwd": "/z"}, mode="a")
+    env.w.poll()
+    assert len(calls) == 1 and env.store.session_dict(SID)["title"] == "proj"
+
+
+def test_watcher_does_not_override_session_start_title(env):
+    env.ev("SessionStart", cwd="/x/app")
+    write(env.main, {"type": "user", "cwd": "/x/app/sub"})
+    env.w.poll()
+    assert env.store.session_dict(SID)["title"] == "app"
+
+
+def test_watcher_rescans_when_transcript_path_changes(env, tmp_path):
+    env.store._sessions.clear()
+    env.store.ingest({"session_id": SID, "transcript_path": str(env.main), "cwd": "/a/b/sub",
+                      "hook_event_name": "Stop"})
+    write(env.main, {"cwd": "/a/b"})
+    env.w.poll()
+    assert env.store.session_dict(SID)["title"] == "b"
+    other = env.root / "other.jsonl"
+    write(other, {"cwd": "/a/c"})
+    env.store.ingest({"session_id": SID, "transcript_path": str(other), "cwd": "/a/c/sub", "hook_event_name": "Stop"})
+    env.w.poll()
+    assert env.store.session_dict(SID)["title"] == "c"
+
+
+def test_watcher_retries_missing_or_empty_head_with_backoff(env, monkeypatch):
+    from cc_mission_control import transcript as tr
+    env.store._sessions.clear()
+    env.store.ingest({"session_id": SID, "transcript_path": str(env.main), "cwd": "/a/b/sub", "hook_event_name": "Stop"})
+    calls = []
+    real = tr.head_cwd
+    monkeypatch.setattr(tr, "head_cwd", lambda *a, **k: calls.append(env.wclock.t) or real(*a, **k))
+    env.w.poll()  # t=0: file missing -> next try at 2, then wait 4
+    env.wclock.advance(1)
+    env.w.poll()
+    assert calls == [0.0]
+    env.wclock.advance(1)
+    env.w.poll()  # t=2: due, still missing -> next at 6
+    env.wclock.advance(3)
+    env.w.poll()  # t=5: not due
+    assert calls == [0.0, 2.0]
+    write(env.main, "")
+    env.wclock.advance(1)
+    env.w.poll()  # t=6: empty -> next at 14
+    assert calls == [0.0, 2.0, 6.0] and env.store.session_dict(SID)["title"] == "sub"
+    write(env.main, {"cwd": "/a/b"})
+    env.wclock.advance(8)
+    env.w.poll()
+    assert env.store.session_dict(SID)["title"] == "b"
+    env.wclock.advance(100)
+    env.w.poll()
+    assert len(calls) == 4  # done: no more scans
+
+
+def test_head_without_cwd_is_picked_up_when_cwd_arrives(env):
+    env.store._sessions.clear()
+    env.store.ingest({"session_id": SID, "transcript_path": str(env.main), "cwd": "/a/b/sub", "hook_event_name": "Stop"})
+    write(env.main, {"type": "summary"})
+    env.w.poll()
+    assert env.store.session_dict(SID)["title"] == "sub"
+    write(env.main, {"type": "user", "cwd": "/a/b"}, mode="a")
+    env.wclock.advance(30)
+    env.w.poll()
+    assert env.store.session_dict(SID)["title"] == "b"
+
+
+def test_head_cwd_handles_junk_and_bounds(tmp_path):
+    from cc_mission_control.transcript import head_cwd
+    p = tmp_path / "t.jsonl"
+    write(p, "not json \"cwd\"\n", {"cwd": 5}, {"cwd": ""}, [1, 2], {"type": "x", "cwd": "/ok"}, {"cwd": "/later"})
+    assert head_cwd(str(p)) == ("/ok", True)
+    assert head_cwd(str(tmp_path / "missing")) == (None, False)
+    write(p, "")
+    assert head_cwd(str(p)) == (None, False)
+    write(p, {"a": 1})
+    assert head_cwd(str(p)) == (None, False)  # short head: a cwd may still arrive
+    # beyond 64 KB and beyond 200 lines is not read
+    write(p, {"pad": "p" * 70_000}, {"cwd": "/far"})
+    assert head_cwd(str(p)) == (None, True)
+    write(p, *([line({"a": 1})] * 200), {"cwd": "/line201"})
+    assert head_cwd(str(p)) == (None, True)
