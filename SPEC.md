@@ -711,6 +711,8 @@ Everything is redacted before it is enqueued (redact first, then truncate, as ev
 
 The hub is the same Python package, started with a separate entry point: `ccmc-hub = cc_mission_control.hub.__main__:main`. It never receives hooks directly.
 
+**IDs:** `machine_id` and `session_id` must match `^[A-Za-z0-9._:@-]{1,128}$` and must not be `.` or `..`. They appear in URL paths, so the hub counts an envelope with any other value as invalid.
+
 **Storage (SQLite, WAL mode, `CCMC_HUB_DB`, default `/data/history.db`):**
 
 ```
@@ -778,7 +780,7 @@ The history UI is built from `ui/` as a second Vite entry (`history.html`) and c
 
 - **Login** page (token field).
 - **Session list:** filters for machine, project, date range and text search, plus a "touched file" path filter. Rows show name, project, machine, start time, duration, agents, tool calls, errors and total tokens.
-- **Session view:** the live HUD layout (topology, lanes, dials, timeline, feed, detail drawer, agent modal) rendered read-only from the replayed `Session`. It adds a **Files** tab (path, op, agent, time, status; click to open the call) and a **Usage** panel (per-agent input, cache and output totals).
+- **Session view:** the live HUD layout (topology, lanes, dials, timeline, feed, detail drawer, agent modal) rendered read-only from the replayed `Session`. It adds a **Files** tab (path, op, agent, time, status; click to open the call) and a **Usage** panel (per-agent input, cache and output totals). A **Permissions** list (denials and permission prompts, from `GET .../permissions`) sits under the Files table. An expired cookie anywhere, including inside the call drawer, returns to the login view.
 - **File lookup:** enter a path and see every session that read or wrote it.
 
 A time scrubber (replaying state up to time T) is designed for but deferred. The API already returns ordered records, so it can be added later without changing the schema.
@@ -804,11 +806,11 @@ The local server's network rules (SPEC 10.1) are unchanged. The hub is a separat
 
 ## 14.1 `.github/workflows/ui-bundle.yml`
 
-Triggers on push and pull request touching `ui/**` or `cc_mission_control/static/**`.
+Triggers on push and pull request touching `ui/**`, `cc_mission_control/static/**` or `cc_mission_control/hub/static/**`.
 
 1. Checkout, set up Node 22.
 2. `npm ci` and `npm run build` in `ui/`.
-3. `git diff --exit-code cc_mission_control/static` — fail with "Run `npm run build` in ui/ and commit the bundle" if the committed bundle doesn't match the source.
+3. `git diff --exit-code cc_mission_control/static cc_mission_control/hub/static`. Fail with "Run `npm run build` in ui/ and commit the bundle" if either committed bundle (the live dashboard or the hub's history page) doesn't match the source.
 
 ## 14.2 `.github/workflows/python.yml`
 
@@ -920,3 +922,4 @@ Reference: `https://code.claude.com/docs/en/hooks`
 - Launcher: `uv run --frozen --no-dev`, fd-level stdout guard, browser only on startup/resume with a 15 s debounce stamp.
 - Redaction covers dict keys and identifier fields with length caps; payloads sanitized to valid JSON/UTF-8. Tool calls match session-wide by `tool_use_id`; failed spawns leave the pending list; a spawn without `subagent_type` counts as `general-purpose`.
 - v0.3 (planned): Section 13 rewritten from "hosted mode, built later" into remote history. A single-user hub runs in Docker and is reachable only over Tailscale, with SQLite, full replay, token usage, and file and permission indexes. Relay v2 replaces the v0.1 fire-and-forget relay with envelopes, transcript-derived records and a disk spool. Milestones 12–16 added.
+- v0.3 (M15): the history UI also shows a permissions list. Hub ids are limited to a URL-safe character set. The bundle-drift check covers `cc_mission_control/hub/static`. The time scrubber and context history are still deferred, since the hub keeps only peak context.
