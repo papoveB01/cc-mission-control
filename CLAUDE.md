@@ -29,14 +29,17 @@ Event flow: Claude Code → `hooks/hooks.json` → FastAPI server on `127.0.0.1:
 - **Context usage** doesn't come from hooks. The transcript tailer reads `message.usage` from transcript `.jsonl` files: input + cache_creation + cache_read + output tokens. Subagent transcripts live at `<session>/subagents/agent-<id>.jsonl`. A sibling `agent-<id>.meta.json` (undocumented) holds `description` and `toolUseId`, and is the preferred way to link a subagent lane to the `Agent` tool call that spawned it. FIFO matching by `agent_type` is the fallback. Strip a leading `agent-` from `agent_id` before using it as a key.
 - **Redaction** (`redact.py`) runs on every payload string before storage, display, or forwarding: redact first, then truncate. Lane payloads over `/ws` carry call summaries only. Full redacted input/output is served by `GET /api/sessions/{sid}/calls/{id}` for the detail drawer.
 - **Security**: bind 127.0.0.1 only. Reject foreign `Host` headers (DNS rebinding) and foreign `Origin` on `/hook`, `/api/*`, `/ws`. `CCMC_DEV_ORIGINS` is the only escape hatch, for the Vite dev server.
-- **Config**: all `CCMC_*` env vars are parsed in `config.py` (`Config.from_env`). The data dir defaults to `$CLAUDE_PLUGIN_DATA`, then `~/.cc-mission-control`.
+- **Config**: all `CCMC_*` env vars are parsed in `config.py` (`Config.from_env`; the hub's `CCMC_HUB_*` vars in `HubConfig.from_env`). The data dir defaults to `$CLAUDE_PLUGIN_DATA`, then `~/.cc-mission-control`.
+- **Remote history (SPEC 13)**: when `CCMC_UPSTREAM_URL` is set, `relay.py` wraps every accepted hook event, plus the transcript-derived updates (`ctx`, `usage`, `meta`, `title`, `cwd`, emitted from `TranscriptWatcher`), in v2 envelopes. It spools them to `<data_dir>/relay/` and batch-POSTs them to the hub. The ingestion path never blocks or does I/O.
+- **Hub** (`cc_mission_control/hub/`, entry point `ccmc-hub`): a separate process. It stores envelopes in SQLite, ignoring duplicates by `eid`, and rebuilds sessions by replaying records through a fresh `Store` whose clock returns each record's `t`. Derived tables (sessions, file_access, permissions, agent_usage) are upserted from that replay. The history UI is a second Vite entry (`ui/history.html` → `cc_mission_control/hub/static/`), built by the same `npm run build` and covered by the same drift check. It shares `HudView` with the live App.
+- **Hub deploy**: `deploy/hub/` (Docker plus a Tailscale sidecar, no published ports). `deploy/hub/deploy.sh <ssh-host>` rsyncs an allowlist and runs compose. The root `.dockerignore` is an allowlist, so `keys/` never enters an image. Keep the Dockerfile `ARG VERSION`, the compose image tag and `deploy/hub/requirements.lock` in sync (enforced by `tests/test_versions.py`).
 
 ## Conventions
 
 - Tests never contain credential-shaped string literals. Build fake secrets at runtime by concatenation (see `tests/test_redact.py`), or GitHub push protection blocks the push.
 - `plugin.json` `version` must be bumped on every release because Claude Code caches plugins by version.
 - The repo is `papoveB01/cc-mission-control` (renamed from the build repo `cc-mission-control-beta` at v0.1.0) and the plugin ID is `cc-mission-control@papoveb01`.
-- `keys/` holds a local GitHub token and is gitignored. Pushes use it per command via a credential helper, never stored in git config. The `gh` CLI token cannot push to this repo.
+- `keys/` holds local secrets and is gitignored: `pat` (GitHub token), `server` (server login), `tailscale` (hub auth key, already used), `hub_token` (hub bearer token). Pushes use it per command via a credential helper, never stored in git config. The `gh` CLI token cannot push to this repo.
 - License is Elastic License 2.0 (licensor Papove Bombando Mfuana). `LICENSE` is the verbatim upstream text; don't edit it.
 
 ## Working model
