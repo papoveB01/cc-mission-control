@@ -18,6 +18,10 @@ services:
       TS_ENABLE_HEALTH_CHECK: "true"
       TS_LOCAL_ADDR_PORT: 127.0.0.1:9002
       TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:-}
+      # Some hosts (e.g. AlmaLinux/RHEL 9+) have no usable legacy iptables, which logs
+      # "can't initialize iptables table 'filter'". tailscaled reads this knob from its
+      # environment (containerboot passes it through) and uses nftables instead.
+      TS_DEBUG_FIREWALL_MODE: nftables
     devices:
       - /dev/net/tun:/dev/net/tun
     cap_add: [NET_ADMIN, NET_RAW]
@@ -40,7 +44,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/hub/Dockerfile
-    image: ccmc-hub:0.2.3
+    image: ccmc-hub:0.3.0
     network_mode: service:tailscale
     # restart: true restarts the hub when tailscale is restarted by compose; if tailscale
     # crashes and restarts on its own, run `docker compose -f deploy/hub/docker-compose.yml restart hub`.

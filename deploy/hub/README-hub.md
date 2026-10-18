@@ -110,6 +110,12 @@ ssh admin@myserver 'cd ~/ccmc-hub && docker compose -f deploy/hub/docker-compose
 
 Logs are rotated (10 MB x 3 per container).
 
+**Troubleshooting: `iptables ... (legacy): can't initialize iptables table 'filter'`** in the
+tailscale logs (with `firewallmode="ipt-default"`) means the host kernel lacks the legacy
+iptables modules (typical on AlmaLinux/RHEL 9+). The compose file sets
+`TS_DEBUG_FIREWALL_MODE: nftables` on the tailscale service to avoid this; if you removed it,
+put it back and run `docker compose -f deploy/hub/docker-compose.yml up -d tailscale`.
+
 ## Backups and restore
 
 The hub writes a daily `VACUUM INTO` copy to `/data/backups/history-YYYYMMDD.db` inside

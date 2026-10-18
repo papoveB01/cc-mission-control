@@ -6,6 +6,8 @@ A Claude Code plugin that opens a live local dashboard for your session. It show
 
 **Quick start:** in Claude Code run `/plugin marketplace add papoveB01/cc-mission-control`, then `/plugin install cc-mission-control@papoveb01`, then start a new session. The dashboard opens at http://127.0.0.1:4317/. Needs Python 3.10+ and [uv](https://docs.astral.sh/uv/) (see Requirements).
 
+**What's new in 0.3.0:** optional remote history. A relay on the local server forwards redacted records to a self-hosted hub (Docker + Tailscale) with a searchable history UI, token usage, file access and permission indexes. Off unless you set `CCMC_UPSTREAM_URL`.
+
 **What's new in 0.2.3:** the project folder is read from the transcript when the dashboard joins a session mid-way; licensor attribution updated.
 
 **What's new in 0.2.2:** sessions show Claude Code's session name (the name you set with `/rename`, else the title Claude Code generated), and the folder is kept as the project.
@@ -249,7 +251,26 @@ See [`SPEC.md`](SPEC.md) for the full design.
 
 ## Remote history (optional)
 
-To keep a searchable history of sessions from several machines, run the hub (a small Docker stack with Tailscale, reachable only over your tailnet) and point each machine at it with `CCMC_UPSTREAM_URL` and `CCMC_UPSTREAM_TOKEN`. Nothing is sent unless you set them. Setup, backups and security notes: [`deploy/hub/README-hub.md`](deploy/hub/README-hub.md).
+To keep a searchable history of sessions from several machines, run the hub (a small Docker stack with Tailscale, reachable only over your tailnet) and point each machine at it with `CCMC_UPSTREAM_URL` and `CCMC_UPSTREAM_TOKEN`. Nothing is sent unless you set them.
+
+**What is captured**, per session and per agent:
+
+- Hook events: session start and end, prompts, tool calls with their inputs and results, subagent start and stop, and compactions.
+- Token usage read from the transcripts (input, cache and output tokens), including subagents.
+- File reads, writes and edits, indexed by path so you can ask which sessions touched a file.
+- Permission events: denied tool calls and permission prompts.
+
+Everything is redacted on your machine before it is queued or sent (see Security and privacy). The hub then rebuilds each session so you can open it later in the same dashboard layout, read-only, at `/history`.
+
+```
+Claude Code -> local server (127.0.0.1:4317) -> redact -> disk spool -> Tailscale -> hub (SQLite) -> /history
+```
+
+If the hub is unreachable, records wait in the spool (capped by `CCMC_SPOOL_MB`) and are retried with backoff.
+
+**Privacy.** Prompts and tool output are stored on your server, after best-effort pattern redaction. Redaction cannot catch every secret, so treat the hub like a transcript archive: keep it on a private tailnet, protect the token, and use `CCMC_HUB_RETENTION_DAYS` if you do not want to keep history forever.
+
+Setup, client configuration, backups, upgrades and troubleshooting: [`deploy/hub/README-hub.md`](deploy/hub/README-hub.md).
 
 ## Development
 
