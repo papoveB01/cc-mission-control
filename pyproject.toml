@@ -23,6 +23,7 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 ccmc-server = "cc_mission_control.__main__:main"
+ccmc-hub = "cc_mission_control.hub.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/papoveB01/cc-mission-control"
@@ -30,7 +31,7 @@ Homepage = "https://github.com/papoveB01/cc-mission-control"
 [tool.hatch.build.targets.wheel]
 packages = ["cc_mission_control"]
 # The built dashboard is committed but not Python source; ship it explicitly.
-artifacts = ["cc_mission_control/static/**"]
+artifacts = ["cc_mission_control/static/**", "cc_mission_control/hub/static/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

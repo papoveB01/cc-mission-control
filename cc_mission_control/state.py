@@ -123,7 +123,7 @@ class Agent:
         self.tool_counts[call.tool] = self.tool_counts.get(call.tool, 0) + 1
         return evicted
 
-    def to_dict(self) -> dict:
+    def to_dict(self, full: bool = False) -> dict:
         counts = dict(sorted(self.tool_counts.items(), key=lambda kv: -kv[1]))
         return {
             "id": self.id,
@@ -140,7 +140,7 @@ class Agent:
             "tool_counts": counts,
             "errors": self.errors,
             "total_calls": self.total_calls,
-            "calls": [c.to_dict() for c in list(self.calls)[-LANE_CALLS:]],
+            "calls": [c.to_dict() for c in (list(self.calls) if full else list(self.calls)[-LANE_CALLS:])],
         }
 
 
@@ -176,7 +176,8 @@ class Session:
         done = sorted((a for a in subs if a.status == "done"), key=lambda a: -(a.ended or 0))
         return [self.agents[MAIN], *live, *done]
 
-    def to_dict(self) -> dict:
+    def to_dict(self, full: bool = False) -> dict:
+        """full=True sends every kept call and activity entry (hub replay), not the live last-N."""
         return {
             "id": self.id,
             "title": self.title,
@@ -190,8 +191,8 @@ class Session:
             "ended": self.ended,
             "last_event": self.last_event,
             "compactions": self.compactions,
-            "agents": [a.to_dict() for a in self.ordered_agents()],
-            "activity": list(self.activity),
+            "agents": [a.to_dict(full) for a in self.ordered_agents()],
+            "activity": list(self.activity) if full else list(self.activity)[-ACTIVITY_MAX:],
         }
 
 
@@ -265,8 +266,10 @@ class Store:
         config: Config,
         redactor: Optional[Redactor] = None,
         clock: Callable[[], float] = time.time,
+        activity_max: int = ACTIVITY_MAX,
     ) -> None:
         self.config = config
+        self.activity_max = max(ACTIVITY_MAX, activity_max)
         self.redactor = redactor or Redactor.from_config(config)
         self.clock = clock
         self._sessions: Dict[str, Session] = {}
@@ -306,10 +309,17 @@ class Store:
             sessions = sorted(self._sessions.values(), key=lambda s: -s.started)
             return [s.to_dict() for s in sessions]
 
-    def session_dict(self, session_id: str) -> Optional[dict]:
+    def session_dict(self, session_id: str, full: bool = False) -> Optional[dict]:
         with self._lock:
             s = self._sessions.get(session_id)
-            return s.to_dict() if s else None
+            return s.to_dict(full) if s else None
+
+    def session_calls(self, session_id: str) -> List[Call]:
+        """Every kept call of a session, oldest first (the hub derives its file index from these)."""
+        with self._lock:
+            s = self._sessions.get(session_id)
+            calls = [c for a in s.agents.values() for c in a.calls] if s else []
+            return sorted(calls, key=lambda c: c.started)
 
     def call_detail(self, session_id: str, call_id: str) -> Optional[dict]:
         with self._lock:
@@ -473,6 +483,8 @@ class Store:
         if s is None:
             cwd = self._ident(event.get("cwd"), CWD_CHARS) or ""
             s = Session(id=sid, title=_title(cwd, sid), started=now, last_event=now, cwd=cwd, current_cwd=cwd)
+            if self.activity_max != ACTIVITY_MAX:
+                s.activity = deque(maxlen=self.activity_max)
             s.title_source = "start" if name == "SessionStart" and cwd else "event" if cwd else ""
             s.agents[MAIN] = self._new_agent(MAIN, "Main", now)
             self._sessions[sid] = s
