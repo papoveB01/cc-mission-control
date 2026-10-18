@@ -74,10 +74,10 @@ Teams that need to govern agent behavior (security review, audit, cost control) 
 
 ## 3.2 Out of scope for v0.1
 
-- Hosted multi-user server, authentication, persistence across restarts (designed for, not built; see Section 13).
+- Hosted multi-user server, authentication, persistence across restarts (single-user remote history added in v0.3; see Section 13).
 - Blocking or approving tool calls (governance enforcement). The dashboard is observational only.
 - Cost in dollars. Token counts only.
-- Historical replay of past sessions from disk.
+- Historical replay of past sessions from disk (added in v0.3 through the hub; see Section 13).
 
 # 4. Architecture
 
@@ -456,7 +456,7 @@ Activity {
 - **Transcript poll.** Runs inside the broadcast loop for active sessions.
 - **Stale check (30 s).** Applies the stale-session rule above.
 - **Idle shutdown (30 s check).** If no active session and no connected dashboard for `CCMC_IDLE_MINUTES` (default 30), exit. `0` disables.
-- **Upstream relay.** Only when `CCMC_UPSTREAM_URL` is set (Section 13).
+- **Upstream relay.** Only when `CCMC_UPSTREAM_URL` is set: spool writer and batch sender (Section 13.1).
 
 Write `server.pid` to the data directory at startup.
 
@@ -657,22 +657,148 @@ Data contract (9.2/9.3), WS handling, the drawer's detail fetch/inert/focus rule
 | `CCMC_MAX_FIELD_CHARS` | `4000` | Truncation length for inputs/outputs |
 | `CCMC_REDACT_FILE` | unset | File of extra redaction regexes |
 | `CCMC_NO_BROWSER` | unset | `1` = never open the browser automatically |
-| `CCMC_UPSTREAM_URL` | unset | Hosted mode: forward redacted events here |
+| `CCMC_UPSTREAM_URL` | unset | Remote history: hub ingest URL (Section 13) |
 | `CCMC_UPSTREAM_TOKEN` | unset | Bearer token for the upstream |
 | `CCMC_STALE_MINUTES` | `60` | Mark a silent session ended after this long |
 | `CCMC_DEV_ORIGINS` | unset | Extra allowed `Origin` values, for the Vite dev server only |
 
 Python package dependencies: `fastapi>=0.110`, `uvicorn>=0.29`, `websockets>=12`, `httpx>=0.27`; dev: `pytest>=8`. Python 3.10+. Build backend: hatchling. Console script: `ccmc-server = cc_mission_control.__main__:main`. The wheel must include `cc_mission_control/static/**` (hatch `artifacts` or `force-include`), since the built bundle is not Python source.
 
-# 13. Hosted mode (designed now, built later)
+# 13. Remote history (v0.3)
 
-The event format already supports multiple machines and users.
+The local server stays the live dashboard. A separate **hub**, which runs in Docker on a remote server, keeps a permanent, replayable history of every session from every machine. Hooks always post to the local server, which relays to the hub. The hook URL never changes.
 
-- **v0.1 (built):** when `CCMC_UPSTREAM_URL` is set, the local server forwards each event, redacted, with two added fields: `machine_id` (first 12 hex chars of SHA-256 of the hostname) and `user` (OS username). Async queue, max 5000; drop when full; never block ingestion.
-- **v0.2 (later):** hosted server reuses the same Store and UI, keyed by `(machine_id, session_id)`; adds token authentication, persistence (SQLite or Postgres), retention policy, and a machine/user filter in the UI.
-- **Commercial line:** offering the hosted version to third parties is reserved to the licensor under the Elastic License 2.0.
+**Locked decisions (v0.3):** single user with several machines; one shared bearer token; the hub is reachable **only over Tailscale** (WireGuard), never on a public port; SQLite on a Docker volume; full replay, including token usage and file access.
 
-The hook URL never changes: hooks always post to the local server, which relays.
+**Commercial line:** offering the hub to third parties is reserved to the licensor under the Elastic License 2.0.
+
+```
+ machine A: local ccmc ─┐  relay: envelope + disk spool + batch retry
+ machine B: local ccmc ─┼──── Tailscale (WireGuard) ────► ccmc-hub:4318  (Docker, tailscale sidecar)
+                        │                                   ├─ /ingest → SQLite /data/history.db
+                        │                                   └─ /history UI + /api/history/*
+```
+
+## 13.1 Relay v2 (local server)
+
+The v0.1 relay (raw event + `machine_id` + `user`, sent once, dropped on failure) is replaced. No hub existed for v0.1, so there is no compatibility constraint.
+
+**Envelope.** Every relayed record is:
+
+```json
+{ "v": 2, "eid": "<uuid4 hex>", "machine_id": "...", "user": "...", "host": "<hostname, redacted>",
+  "t": 1760000000.123, "kind": "hook" | "ctx" | "usage" | "meta" | "title" | "cwd", "session_id": "...", "data": { ... } }
+```
+
+`t` is the local server's receive time, and replay uses it as the Store clock. `eid` is unique per record. The hub ignores duplicates, so delivery is at-least-once and safe to retry.
+
+| kind | Emitted when | `data` |
+|---|---|---|
+| `hook` | Every `/hook` event the Store accepts, and SessionStart from the launcher | The redacted hook payload |
+| `ctx` | `Store.set_context` is called by the tailer | `{agent_id, tokens, model}` |
+| `usage` | The tailer reads an `assistant` entry with usage (main and subagents) | `{agent_id, message_id, model, input, cache_creation, cache_read, output}`. The hub deduplicates by `message_id` per agent, since a transcript can repeat a message across streamed entries |
+| `meta` | `apply_subagent_meta` | `{agent_id, agent_type, description, tool_use_id}` |
+| `title` | `set_ai_title` / `set_custom_title` | `{source: "generated" \| "custom", title}` |
+| `cwd` | `set_project_cwd` | `{cwd}` |
+
+Everything is redacted before it is enqueued (redact first, then truncate, as everywhere else).
+
+**Spool.** Records go to an append-only spool in `<data_dir>/relay/` as JSONL segment files of up to 4 MB each. This happens off the ingestion path, through a bounded in-memory queue. If that queue is full, the record is counted as dropped. A sender task POSTs batches of up to 200 records or 1 MB to `<CCMC_UPSTREAM_URL>` (the hub's `/ingest`) with `Authorization: Bearer <CCMC_UPSTREAM_TOKEN>`. A segment is deleted only after a 2xx for all of its records. On failure it backs off exponentially (1 s up to 5 min). The spool survives restarts and is capped at `CCMC_SPOOL_MB` (default 200), with the oldest segments dropped first and counted. `/health` gains `relay: {queued, spooled_bytes, dropped, last_ok, last_error}` when the relay is enabled.
+
+**Idle shutdown** must not lose data: it flushes the in-memory queue to the spool before exiting. Unsent records are sent on the next start.
+
+## 13.2 Hub server
+
+The hub is the same Python package, started with a separate entry point: `ccmc-hub = cc_mission_control.hub.__main__:main`. It never receives hooks directly.
+
+**Storage (SQLite, WAL mode, `CCMC_HUB_DB`, default `/data/history.db`):**
+
+```
+records(eid TEXT PRIMARY KEY, machine_id, user, host, session_id, kind, t REAL, received REAL, data TEXT)   -- append-only, the replay source
+sessions(machine_id, session_id, user, host, name, name_source, project, cwd, model, status,
+         started, ended, last_event, agents, tool_calls, errors, compactions,
+         tokens_in, tokens_cache_create, tokens_cache_read, tokens_out, peak_context,
+         PRIMARY KEY(machine_id, session_id))                                                        -- derived summary
+agent_usage(machine_id, session_id, agent_id, message_id, model, input, cache_creation, cache_read, output, t,
+         PRIMARY KEY(machine_id, session_id, agent_id, message_id))
+file_access(machine_id, session_id, agent_id, call_id, path, op, tool, status, t)                    -- derived index
+permissions(machine_id, session_id, agent_id, call_id, tool, kind, text, t)                          -- derived index
+```
+
+Indexes cover `records(machine_id, session_id, t)`, `sessions(started)`, `sessions(project)`, `file_access(path)` and `file_access(machine_id, session_id)`. The schema is versioned with `PRAGMA user_version`, and migrations run at startup.
+
+**File access mapping** (from `PreToolUse` input, with status updated by the matching Post or failure):
+
+| Tool | op | path from |
+|---|---|---|
+| `Read`, `NotebookRead` | `read` | `file_path` / `notebook_path` |
+| `Write` | `write` | `file_path` |
+| `Edit`, `MultiEdit`, `NotebookEdit` | `edit` | `file_path` / `notebook_path` |
+| `Glob`, `Grep` | `search` | `path` (or the session cwd), with the pattern kept in the summary |
+| `Bash` | not indexed | Commands are not parsed for paths. The call itself is in the replay |
+
+**Permissions index:** `PermissionDenied` events (`kind: "denied"`), and `Notification` events whose type indicates a permission prompt (`kind: "prompt"`).
+
+**Token totals:** `sessions.tokens_*` are sums over `agent_usage` across all agents. `peak_context` is the largest `ctx.tokens` seen for any agent.
+
+**Replay:** `GET` for a session loads its `records` ordered by `(t, received)` and feeds them into a fresh `Store` whose clock returns each record's `t`. `hook` goes to `ingest`, and `ctx`/`meta`/`title`/`cwd` go to the matching setters. It returns `Store.session_dict` (the same `Session` shape as SPEC 9.3), plus `usage` totals per agent. The `Store` must therefore allow a session's call and activity limits to be raised for replay (`CCMC_MAX_CALLS` still bounds memory). Replay results are cached in memory (LRU, 16 sessions) and invalidated when new records arrive for that session.
+
+**Endpoints:**
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/health` | `{app: "cc-mission-control-hub", version, records, sessions, db_bytes}`, unauthenticated |
+| POST | `/ingest` | JSON array of envelopes. Returns `200 {"accepted": n, "duplicates": d}`. Malformed items are skipped and counted. Body cap 2 MB |
+| GET | `/api/history/sessions` | Filters: `machine`, `project`, `q` (searches name, project and prompts), `from`, `to`, `has_file`. Sorted by `started` desc, cursor pagination (50 per page) |
+| GET | `/api/history/sessions/{machine_id}/{session_id}` | Replayed `Session` + usage totals |
+| GET | `/api/history/sessions/{machine_id}/{session_id}/calls/{call_id}` | `ToolCallDetail`, the same shape as the live drawer |
+| GET | `/api/history/sessions/{machine_id}/{session_id}/files` | File access rows for the session |
+| GET | `/api/history/files` | `path` (exact) or `prefix`: which sessions read or wrote it, newest first |
+| GET | `/api/history/machines` | Distinct machines with user, host, first and last seen |
+| GET | `/history`, `/assets/*` | History UI bundle |
+
+**Auth:** every endpoint except `/health` requires the token (`CCMC_HUB_TOKEN`, at least 32 chars, compared in constant time). `/ingest` takes it as a Bearer header. The UI sends `POST /login {token}`, which sets an `HttpOnly; SameSite=Strict` session cookie (HMAC of the token, valid 30 days). `/api/history/*` accepts that cookie or the Bearer header. Tailscale is the network boundary and the token is the second layer.
+
+**Host/Origin:** the hub rejects `Host` values not listed in `CCMC_HUB_HOSTS`, a comma-separated list. It defaults to `ccmc-hub` plus its MagicDNS name. Foreign `Origin` values on `/api/*` and `/login` are rejected.
+
+**Retention:** `CCMC_HUB_RETENTION_DAYS` (default `0` = keep forever). A daily job deletes sessions whose `last_event` is older than the limit, with all their rows, then runs `VACUUM` incrementally.
+
+**Backups:** a daily `VACUUM INTO /data/backups/history-YYYYMMDD.db` keeps the last `CCMC_HUB_BACKUPS` copies (default 7).
+
+## 13.3 Deployment (`deploy/hub/`)
+
+- `Dockerfile`: `python:3.12-slim`, non-root user, installs the wheel, `EXPOSE 4318`, healthcheck on `/health`, volume `/data`.
+- `docker-compose.yml`: two services. `tailscale` (`tailscale/tailscale`, `TS_AUTHKEY` from `.env`, `TS_HOSTNAME=ccmc-hub`, state on a volume) and `hub`, which uses `network_mode: service:tailscale`. **No `ports:` are published.** The hub is reachable only as `http://ccmc-hub.<tailnet>.ts.net:4318`, encrypted by WireGuard.
+- `.env.example` lists `TS_AUTHKEY`, `CCMC_HUB_TOKEN`, `CCMC_HUB_RETENTION_DAYS` and `CCMC_HUB_BACKUPS`. The real `.env` is gitignored.
+- `README-hub.md` covers server prerequisites (SSH key login with password auth disabled, Docker, a Tailscale auth key), `docker compose up -d`, client setup (`CCMC_UPSTREAM_URL` / `CCMC_UPSTREAM_TOKEN` in `~/.claude/settings.json` `env`, or in the shell profile), upgrades, and backup and restore.
+
+## 13.4 History UI
+
+The history UI is built from `ui/` as a second Vite entry (`history.html`) and committed under `cc_mission_control/hub/static/`. It is covered by the same bundle-drift CI. It reuses the HUD theme and components.
+
+- **Login** page (token field).
+- **Session list:** filters for machine, project, date range and text search, plus a "touched file" path filter. Rows show name, project, machine, start time, duration, agents, tool calls, errors and total tokens.
+- **Session view:** the live HUD layout (topology, lanes, dials, timeline, feed, detail drawer, agent modal) rendered read-only from the replayed `Session`. It adds a **Files** tab (path, op, agent, time, status; click to open the call) and a **Usage** panel (per-agent input, cache and output totals).
+- **File lookup:** enter a path and see every session that read or wrote it.
+
+A time scrubber (replaying state up to time T) is designed for but deferred. The API already returns ordered records, so it can be added later without changing the schema.
+
+## 13.5 Configuration additions
+
+| Variable | Where | Default | Purpose |
+|---|---|---|---|
+| `CCMC_UPSTREAM_URL` | local | unset | Hub ingest URL, e.g. `http://ccmc-hub.<tailnet>.ts.net:4318/ingest`. Enables the relay |
+| `CCMC_UPSTREAM_TOKEN` | local | unset | Hub token |
+| `CCMC_SPOOL_MB` | local | `200` | Relay spool cap |
+| `CCMC_HUB_TOKEN` | hub | required | Shared token (≥ 32 chars). The hub refuses to start without it |
+| `CCMC_HUB_DB` | hub | `/data/history.db` | SQLite path |
+| `CCMC_HUB_PORT` | hub | `4318` | Listen port |
+| `CCMC_HUB_BIND` | hub | `0.0.0.0` | Inside the container only. Reachability is set by the compose network, never by a published port |
+| `CCMC_HUB_HOSTS` | hub | `ccmc-hub` | Allowed `Host` values (comma-separated, port optional) |
+| `CCMC_HUB_RETENTION_DAYS` | hub | `0` | `0` = keep forever |
+| `CCMC_HUB_BACKUPS` | hub | `7` | Daily backups kept |
+
+The local server's network rules (SPEC 10.1) are unchanged. The hub is a separate process with its own rules (13.2).
 
 # 14. CI/CD
 
@@ -738,6 +864,11 @@ Build in this order. Each milestone has a done condition.
 | 9 | CI workflows | Both workflows green on GitHub |
 | 10 | Real-session acceptance | All Section 15.3 checks pass |
 | 11 | README + examples, tag v0.1.0 | Public repo installable by a third party from the README alone |
+| 12 | Relay v2 (13.1): envelope, transcript-derived records, disk spool, batch retry | Tests: records of every kind are emitted and redacted; spool survives restart; retries after hub failure; duplicates safe; cap drops oldest; ingestion never blocks |
+| 13 | Hub server (13.2): SQLite schema, `/ingest`, derived indexes, replay, read API, auth | Tests: idempotent ingest; replay of a recorded session equals the live `session_dict`; file and permission index; token totals; auth, cookie and Host checks; retention |
+| 14 | Docker deploy (13.3) | `docker compose up` on the remote server; hub reachable only over Tailscale; `/health` OK; nothing listening on public interfaces |
+| 15 | History UI (13.4) | List, filters, session replay, Files and Usage panels, file lookup, working against a seeded hub |
+| 16 | Two-machine acceptance, tag v0.3.0 | Real sessions from two machines appear in the hub, with replay, file access and tokens correct; the hub offline for 10 minutes loses nothing |
 
 **Instruction for Claude Code:** treat this document as the source of truth. Before implementing hooks, confirm current field names against the Claude Code hooks reference (`https://code.claude.com/docs/en/hooks`), since the hook system changes often. Where the docs and this spec disagree on a Claude Code fact, follow the docs and note the change in the README.
 
@@ -788,3 +919,4 @@ Reference: `https://code.claude.com/docs/en/hooks`
 - v0.2.1: UI auto-reloads once when the snapshot `version` differs from the build version (sessionStorage guard, manual Reload button if it still differs); timeline text alternative moved into a clipped wrapper so long summaries no longer push the row labels off-screen; injected prompts no longer replace the main task, and typed slash commands (`<command-name>` / `<command-message>` / `<command-args>` tags) show as `/<name> <args>`; the session title keeps the start directory; the dashboard page is served with no-cache headers; a test keeps the UI, Python, pyproject and plugin versions equal.
 - Launcher: `uv run --frozen --no-dev`, fd-level stdout guard, browser only on startup/resume with a 15 s debounce stamp.
 - Redaction covers dict keys and identifier fields with length caps; payloads sanitized to valid JSON/UTF-8. Tool calls match session-wide by `tool_use_id`; failed spawns leave the pending list; a spawn without `subagent_type` counts as `general-purpose`.
+- v0.3 (planned): Section 13 rewritten from "hosted mode, built later" into remote history. A single-user hub runs in Docker and is reachable only over Tailscale, with SQLite, full replay, token usage, and file and permission indexes. Relay v2 replaces the v0.1 fire-and-forget relay with envelopes, transcript-derived records and a disk spool. Milestones 12–16 added.
