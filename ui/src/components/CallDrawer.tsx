@@ -13,6 +13,10 @@ interface Props {
   sessionId: string;
   callId: string;
   tool: string;
+  /** Where the full call detail lives. Defaults to the live server route. */
+  urlFor: (sessionId: string, callId: string) => string;
+  /** The detail request was answered with 401. Without it, a message is shown. */
+  onUnauthorized?: () => void;
   /** Live status of the call from the session state (drives refetch). */
   status: CallStatus | null;
   /** An overlay above the drawer (palette, shortcuts) is open: ignore Esc. */
@@ -31,7 +35,10 @@ function narrowDetail(v: unknown): ToolCallDetail | null {
 
 const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
-export function CallDrawer({ sessionId, callId, tool, status, suspended = false, returnTo = null, onClose }: Props) {
+/** Live detail of one call (the full redacted input and output). Passed by the live App. */
+export const liveCallUrl = (sessionId: string, callId: string): string => `/api/sessions/${encodeURIComponent(sessionId)}/calls/${encodeURIComponent(callId)}`;
+
+export function CallDrawer({ sessionId, callId, tool, urlFor, onUnauthorized, status, suspended = false, returnTo = null, onClose }: Props) {
   const [load, setLoad] = useState<Load>({ kind: "loading" });
   const panel = useRef<HTMLDivElement>(null);
   const opener = useRef<Element | null>(returnTo ?? document.activeElement);
@@ -46,9 +53,11 @@ export function CallDrawer({ sessionId, callId, tool, status, suspended = false,
 
   useEffect(() => {
     const ctl = new AbortController();
-    fetch(`/api/sessions/${encodeURIComponent(sessionId)}/calls/${encodeURIComponent(callId)}`, { signal: ctl.signal })
+    fetch(urlFor(sessionId, callId), { signal: ctl.signal, credentials: "same-origin" })
       .then(async (res) => {
         if (res.status === 404) return setLoad({ kind: "gone" });
+        if (res.status === 401 && onUnauthorized) return onUnauthorized();
+        if (res.status === 401) return setLoad({ kind: "error", message: "Signed out. Reload the page to sign in again." });
         if (!res.ok) return setLoad({ kind: "error", message: `Request failed (${res.status})` });
         const detail = narrowDetail(await res.json());
         setLoad(detail ? { kind: "ok", detail } : { kind: "error", message: "Unexpected response" });
@@ -58,7 +67,7 @@ export function CallDrawer({ sessionId, callId, tool, status, suspended = false,
         setLoad({ kind: "error", message: err instanceof Error ? err.message : "Request failed" });
       });
     return () => ctl.abort();
-  }, [sessionId, callId, status]);
+  }, [sessionId, callId, status, urlFor, onUnauthorized]);
 
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent): void => {

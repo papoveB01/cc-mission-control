@@ -40,6 +40,8 @@ export interface PaletteContext {
   sessions: readonly Session[];
   selectedId: string | null;
   names: ReadonlyMap<string, string>;
+  /** False for a finished replay (hides "Follow live"). Defaults to true. */
+  live?: boolean;
 }
 
 /** Recent calls of the selected session, newest first. */
@@ -57,7 +59,7 @@ export function buildResults(query: string, ctx: PaletteContext): PaletteGroup[]
   const labels = tabLabels(ctx.sessions, Infinity);
   const limit = query.trim() === "" ? 4 : GROUP_LIMIT;
 
-  const actions: PaletteItem[] = ACTIONS.map((a) => ({ id: `action:${a.id}`, label: a.label, detail: a.detail, target: { type: "action", id: a.id } }));
+  const actions: PaletteItem[] = ACTIONS.filter((a) => ctx.live !== false || a.id !== "follow").map((a) => ({ id: `action:${a.id}`, label: a.label, detail: a.detail, target: { type: "action", id: a.id } }));
   const sessions: PaletteItem[] = ctx.sessions.map((s) => ({
     id: `session:${s.id}`,
     label: labels.get(s.id) ?? sessionName(s),

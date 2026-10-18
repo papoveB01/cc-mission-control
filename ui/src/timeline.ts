@@ -2,7 +2,10 @@ import { formatClock, formatClockSeconds } from "./format";
 import type { Agent, Session, ToolCall } from "./types";
 
 export const MIN_SPAN = 2;
+/** Zoom-out cap of the live view: one day. */
 export const MAX_SPAN = 86_400;
+/** Zoom-out cap of a replayed session, which can span days: 30 days. */
+export const HISTORY_MAX_SPAN = 2_592_000;
 export const DEFAULT_SPAN = 120;
 /** Fraction of the plot where "now" sits while following live. */
 export const FOLLOW_ANCHOR = 0.98;
@@ -26,6 +29,8 @@ export interface TimelineState {
   follow: boolean;
   /** Automatic zoom: show the whole session until it is longer than `span`, then slide. */
   auto: boolean;
+  /** Zoom-out cap in seconds. Defaults to MAX_SPAN (live). */
+  maxSpan?: number;
 }
 
 export type TimelineAction =
@@ -37,8 +42,10 @@ export type TimelineAction =
   | { type: "reset" };
 
 export const initialTimeline: TimelineState = { start: 0, span: DEFAULT_SPAN, follow: true, auto: true };
+/** A finished replay: not following, 30-day zoom cap. The view fits the session on open. */
+export const historyTimeline: TimelineState = { start: 0, span: DEFAULT_SPAN, follow: false, auto: true, maxSpan: HISTORY_MAX_SPAN };
 
-const clampSpan = (span: number): number => Math.min(MAX_SPAN, Math.max(MIN_SPAN, span));
+const clampSpan = (span: number, max: number = MAX_SPAN): number => Math.min(max, Math.max(MIN_SPAN, span));
 
 /** Keep the window within [t0 - span/2, edge + span/2] so it cannot be panned into the void. */
 export function clampStart(start: number, span: number, bounds?: Bounds): number {
@@ -50,10 +57,10 @@ export function clampStart(start: number, span: number, bounds?: Bounds): number
  * The window shown while following live. Derived from the clock, so no state update is needed
  * each second. Automatic zoom shows the whole session until it outgrows `span`.
  */
-export function followView(s: Pick<TimelineState, "span" | "auto">, t0: number, edge: number): View {
+export function followView(s: Pick<TimelineState, "span" | "auto" | "maxSpan">, t0: number, edge: number): View {
   const len = Math.max(0, edge - t0);
   if (s.auto && len * 1.08 <= s.span) {
-    return { start: t0 - len * 0.04, span: clampSpan(len * 1.08) };
+    return { start: t0 - len * 0.04, span: clampSpan(len * 1.08, s.maxSpan) };
   }
   return { start: edge - s.span * FOLLOW_ANCHOR, span: s.span };
 }
@@ -62,11 +69,11 @@ export function timelineReducer(s: TimelineState, a: TimelineAction): TimelineSt
   switch (a.type) {
     case "pan": {
       const span = a.view.span;
-      return { start: clampStart(a.view.start + a.dt, span, a.bounds), span, follow: false, auto: false };
+      return { ...s, start: clampStart(a.view.start + a.dt, span, a.bounds), span, follow: false, auto: false };
     }
     case "zoom": {
       // While following, the right edge (now) stays put; the window is derived from the span.
-      const span = clampSpan(a.view.span / a.factor);
+      const span = clampSpan(a.view.span / a.factor, s.maxSpan);
       if (s.follow) return { ...s, span, auto: false };
       const anchor = Math.min(1, Math.max(0, a.anchor));
       const at = a.view.start + anchor * a.view.span;
@@ -74,19 +81,19 @@ export function timelineReducer(s: TimelineState, a: TimelineAction): TimelineSt
     }
     case "fit": {
       const len = Math.max(a.t1 - a.t0, 0);
-      const span = clampSpan(len * 1.06 || DEFAULT_SPAN);
+      const span = clampSpan(len * 1.06 || DEFAULT_SPAN, s.maxSpan);
       // A fit that includes "now" keeps following; a fit of a finished session does not.
-      return { start: a.t0 - (span - len) / 2, span, follow: a.live, auto: false };
+      return { ...s, start: a.t0 - (span - len) / 2, span, follow: a.live, auto: false };
     }
     case "center": {
       const span = a.view.span;
-      return { start: clampStart(a.t - span / 2, span, a.bounds), span, follow: false, auto: false };
+      return { ...s, start: clampStart(a.t - span / 2, span, a.bounds), span, follow: false, auto: false };
     }
     case "follow":
       if (a.on) return { ...s, follow: true };
-      return a.view ? { start: a.view.start, span: a.view.span, follow: false, auto: false } : { ...s, follow: false };
+      return a.view ? { ...s, start: a.view.start, span: a.view.span, follow: false, auto: false } : { ...s, follow: false };
     case "reset":
-      return initialTimeline;
+      return s.maxSpan === undefined ? initialTimeline : { ...s, ...historyTimeline };
   }
 }
 
@@ -113,7 +120,8 @@ export function barLayout(call: Pick<ToolCall, "started" | "ended" | "duration_m
 /** Whether a bar is wide enough to carry its tool name (about 6.5 px per character plus padding). */
 export const fitsLabel = (w: number, label: string): boolean => w >= label.length * 6.5 + 10;
 
-const STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 21600, 43200, 86400];
+// Up to 30 days, so labels stay apart when a replayed session spans weeks.
+const STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 21600, 43200, 86400, 172800, 604800, 1209600, 2592000];
 
 export interface Tick {
   t: number;
