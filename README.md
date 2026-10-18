@@ -190,8 +190,9 @@ All settings are environment variables, read when the server starts.
 | `CCMC_MAX_FIELD_CHARS` | `4000` | Truncation length for captured inputs and outputs. |
 | `CCMC_REDACT_FILE` | unset | Path to a file of extra redaction regexes (see Security and privacy). |
 | `CCMC_NO_BROWSER` | unset | `1` = never open the browser automatically. |
-| `CCMC_UPSTREAM_URL` | unset | Forward redacted events to this URL. Off by default. |
+| `CCMC_UPSTREAM_URL` | unset | Forward redacted records to this URL as JSON arrays of v2 envelopes. Off by default; when unset, nothing is created or sent. Records are spooled to `<data dir>/relay/` and retried with backoff until the upstream accepts them. |
 | `CCMC_UPSTREAM_TOKEN` | unset | Bearer token sent to the upstream. |
+| `CCMC_SPOOL_MB` | `200` | Cap on the relay spool on disk. Past it, the oldest segments are deleted and counted as dropped (shown in `/health`). |
 | `CCMC_DEV_ORIGINS` | unset | Comma-separated extra allowed `Origin` values, for the Vite dev server only (for example `http://localhost:5173`). |
 | `CCMC_LAUNCH_DEADLINE` | `17` | Launcher only. Seconds after which the `SessionStart` launcher gives up and exits 0, so it always finishes inside the hook's 20 second timeout. |
 

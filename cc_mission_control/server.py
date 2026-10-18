@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import getpass
-import hashlib
 import json
 import logging
-import socket
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -19,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import APP_ID, __version__
 from .config import Config
+from .relay import RELAY_MAX, Relay, machine_id, os_user  # noqa: F401
 from .state import Store
 from .transcript import TranscriptWatcher
 
@@ -42,8 +40,6 @@ HOUSEKEEPING_INTERVAL = 30.0
 SEND_TIMEOUT = 1.0
 CLIENT_QUEUE = 16
 MAX_HOOK_BYTES = 8 * 1024 * 1024
-RELAY_MAX = 5000
-RELAY_TIMEOUT = 5.0
 WS_POLICY_VIOLATION = 1008
 WS_INTERNAL_ERROR = 1011
 
@@ -61,58 +57,6 @@ def dumps(obj: Any) -> Optional[str]:
     except (TypeError, ValueError):
         log.warning("dropping message that is not valid JSON", exc_info=True)
         return None
-
-
-def machine_id() -> str:
-    return hashlib.sha256(socket.gethostname().encode("utf-8", "replace")).hexdigest()[:12]
-
-
-def os_user() -> str:
-    try:
-        return getpass.getuser()
-    except Exception:
-        return ""
-
-
-class Relay:
-    """Bounded fire-and-forget queue to the hosted upstream. Ingestion never waits on it."""
-
-    def __init__(self, config: Config, redactor: Any, maxsize: int = RELAY_MAX) -> None:
-        self.url = config.upstream_url or ""
-        self.token = config.upstream_token
-        self.redactor = redactor
-        self.queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
-        self.machine_id = machine_id()
-        self.user = os_user()
-        self.dropped = 0
-
-    def enqueue(self, event: Any) -> bool:
-        if not isinstance(event, dict):
-            return False
-        item = self.redactor.value(event)
-        item["machine_id"] = self.machine_id
-        item["user"] = self.user
-        try:
-            self.queue.put_nowait(item)
-        except asyncio.QueueFull:
-            self.dropped += 1
-            return False
-        return True
-
-    async def send_one(self, client: Any, item: dict) -> None:
-        headers = {"Authorization": "Bearer " + self.token} if self.token else {}
-        try:
-            await client.post(self.url, json=item, headers=headers)
-        except Exception as exc:
-            log.warning("upstream relay failed (%s); event dropped", type(exc).__name__)
-
-    async def run(self) -> None:
-        import httpx
-
-        async with httpx.AsyncClient(timeout=RELAY_TIMEOUT) as client:
-            while True:
-                item = await self.queue.get()
-                await self.send_one(client, item)
 
 
 class Client:
@@ -163,9 +107,17 @@ def create_app(
     clock: Callable[[], float] = time.time,
     start_loops: bool = True,
     relay_maxsize: int = RELAY_MAX,
+    relay_options: dict | None = None,
 ) -> FastAPI:
     store = store or Store(config, clock=clock)
+    relay = (
+        Relay(config, store.redactor, relay_maxsize, clock=clock, **(relay_options or {}))
+        if config.upstream_url
+        else None
+    )
     watcher = watcher or TranscriptWatcher(store)
+    if relay is not None and watcher.emit is None:
+        watcher.emit = relay.emit
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -174,7 +126,8 @@ def create_app(
             tasks.append(asyncio.create_task(_forever(app.state.broadcast_tick, BROADCAST_INTERVAL)))
             tasks.append(asyncio.create_task(_forever(app.state.housekeeping_tick, HOUSEKEEPING_INTERVAL)))
             if app.state.relay is not None:
-                tasks.append(asyncio.create_task(_relay_forever(app.state.relay)))
+                tasks.append(asyncio.create_task(_relay_forever(app.state.relay.run_writer)))
+                tasks.append(asyncio.create_task(_relay_forever(app.state.relay.run_sender)))
         try:
             yield
         finally:
@@ -183,6 +136,11 @@ def create_app(
             for task in tasks:
                 with contextlib.suppress(BaseException):
                     await task
+            if app.state.relay is not None:
+                try:
+                    app.state.relay.flush_sync()
+                except Exception:
+                    log.debug("relay flush failed", exc_info=True)
             for hook in list(app.state.on_shutdown):
                 try:
                     hook()
@@ -195,7 +153,7 @@ def create_app(
     state.store = store
     state.watcher = watcher
     state.clients = {}  # WebSocket -> Client
-    state.relay = Relay(config, store.redactor, relay_maxsize) if config.upstream_url else None
+    state.relay = relay
     state.request_shutdown = lambda: None
     state.on_shutdown = []
     state.idle_since = clock()
@@ -293,13 +251,16 @@ def create_app(
     @app.get("/health")
     async def health() -> dict:
         snap = store.snapshot()
-        return {
+        out = {
             "app": APP_ID,
             "version": __version__,
             "clients": len(state.clients),
             "sessions": len(snap),
             "active": sum(1 for s in snap if s.get("status") == "active"),
         }
+        if state.relay is not None:
+            out["relay"] = state.relay.stats()
+        return out
 
     async def read_capped(request: Request) -> Optional[bytes]:
         """Request body, or None when it exceeds MAX_HOOK_BYTES (checked without buffering it all)."""
@@ -320,9 +281,9 @@ def create_app(
             body = await read_capped(request)
             event = json.loads(body) if body is not None else None
             if isinstance(event, dict):
-                store.ingest(event)
-                if state.relay is not None:
-                    state.relay.enqueue(event)
+                sid = store.ingest(event)
+                if sid is not None and state.relay is not None:
+                    state.relay.emit("hook", sid, event)
         except Exception:
             log.debug("hook ignored", exc_info=True)
         return Response(status_code=200)
@@ -380,12 +341,12 @@ async def _forever(tick: Callable, interval: float) -> None:
         await asyncio.sleep(interval)
 
 
-async def _relay_forever(relay: Relay) -> None:
+async def _relay_forever(run: Callable) -> None:
     while True:
         try:
-            await relay.run()
+            await run()
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.exception("relay crashed; restarting")
+            log.exception("relay task crashed; restarting")
             await asyncio.sleep(1.0)

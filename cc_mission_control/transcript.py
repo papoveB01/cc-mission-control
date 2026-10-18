@@ -34,6 +34,11 @@ HEAD_LINES = 200
 class Usage:
     tokens: int
     model: Optional[str]
+    input: int = 0
+    cache_creation: int = 0
+    cache_read: int = 0
+    output: int = 0
+    message_id: Optional[str] = None
 
 
 def _is_int(value: Any) -> bool:
@@ -50,11 +55,15 @@ def usage_from_entry(entry: dict, *, main: bool) -> Optional[Usage]:
     usage = message.get("usage") if isinstance(message, dict) else None
     if not isinstance(usage, dict):
         return None
-    tokens = sum(v for v in (usage.get(k) for k in USAGE_KEYS) if _is_int(v) and v > 0)
+    counts = [v if _is_int(v) and v > 0 else 0 for v in (usage.get(k) for k in USAGE_KEYS)]
+    tokens = sum(counts)
     model = message.get("model")
     if not isinstance(model, str) or not model or model == SYNTHETIC:
         model = None
-    return Usage(tokens, model)
+    mid = message.get("id")
+    if not isinstance(mid, str) or not mid:
+        mid = entry.get("uuid")
+    return Usage(tokens, model, *counts, mid if isinstance(mid, str) and mid else None)
 
 
 def title_from_entry(entry: Any) -> Tuple[Optional[str], Optional[str]]:
@@ -248,8 +257,10 @@ class TranscriptWatcher:
         *,
         clock: Callable[[], float] = time.monotonic,
         search_interval: float = 2.0,
+        emit: Optional[Callable[[str, str, dict], None]] = None,
     ) -> None:
         self.store = store
+        self.emit = emit
         self.clock = clock
         self.search_interval = search_interval
         self._tails: Dict[Tuple[str, str, str], Tail] = {}
@@ -348,6 +359,7 @@ class TranscriptWatcher:
                 self._miss(self._head_looked, hkey)
             if cwd and self.store.set_project_cwd(sid, cwd):
                 changed.add(sid)
+                self._emit("cwd", sid, {"cwd": cwd})
         tkey = (sid, aid, path)
         seen.add(tkey)
         tail = self._tails.get(tkey)
@@ -368,16 +380,32 @@ class TranscriptWatcher:
                     ai, custom = ai or back_ai, custom or back_custom
             if ai and self.store.set_ai_title(sid, ai):
                 changed.add(sid)
+                self._emit("title", sid, {"source": "generated", "title": ai})
             if custom and self.store.set_custom_title(sid, custom):
                 changed.add(sid)
+                self._emit("title", sid, {"source": "custom", "title": custom})
         latest: Optional[Usage] = None
         for entry in entries:
             usage = usage_from_entry(entry, main=is_main)
             if usage is not None:
                 latest = usage
+                self._emit("usage", sid, {
+                    "agent_id": aid, "message_id": usage.message_id, "model": usage.model,
+                    "input": usage.input, "cache_creation": usage.cache_creation,
+                    "cache_read": usage.cache_read, "output": usage.output,
+                })
         if latest is not None:
             self.store.set_context(sid, aid, latest.tokens, latest.model)
             changed.add(sid)
+            self._emit("ctx", sid, {"agent_id": aid, "tokens": latest.tokens, "model": latest.model})
+
+    def _emit(self, kind: str, sid: str, data: dict) -> None:
+        if self.emit is None:
+            return
+        try:
+            self.emit(kind, sid, data)
+        except Exception:
+            log.debug("emit failed", exc_info=True)
 
     def _search(self, main_path: str, aid: str) -> Optional[str]:
         base = main_path[: -len(JSONL)]
@@ -410,8 +438,11 @@ class TranscriptWatcher:
                 continue
             self._meta_done.add(key)
             self._meta_looked.pop(key, None)
-            self.store.apply_subagent_meta(
-                sid, aid, _opt_str(meta.get("description")), _opt_str(meta.get("toolUseId"))
-            )
+            desc, tool_use_id = _opt_str(meta.get("description")), _opt_str(meta.get("toolUseId"))
+            self.store.apply_subagent_meta(sid, aid, desc, tool_use_id)
+            self._emit("meta", sid, {
+                "agent_id": aid, "agent_type": _opt_str(meta.get("agentType")),
+                "description": desc, "tool_use_id": tool_use_id,
+            })
             return
         self._miss(self._meta_looked, key)
