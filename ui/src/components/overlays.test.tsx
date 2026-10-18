@@ -4,7 +4,7 @@ import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Agent, Session } from "../types";
 import { AgentModal } from "./AgentModal";
-import { CallDrawer } from "./CallDrawer";
+import { CallDrawer, liveCallUrl } from "./CallDrawer";
 import { Palette } from "./Palette";
 
 const agent = (over: Partial<Agent> = {}): Agent => ({
@@ -123,7 +123,7 @@ describe("Esc layering", () => {
     return (
       <>
         {modal ? <AgentModal {...modalProps(s, "main", { suspended: drawer || palette, onClose: () => { log.push("modal"); setModal(false); } })} /> : null}
-        {drawer ? <CallDrawer sessionId="s" callId="c1" tool="Bash" status="ok" suspended={palette} onClose={() => { log.push("drawer"); setDrawer(false); }} /> : null}
+        {drawer ? <CallDrawer sessionId="s" callId="c1" tool="Bash" urlFor={liveCallUrl} status="ok" suspended={palette} onClose={() => { log.push("drawer"); setDrawer(false); }} /> : null}
         {palette ? (
           <Palette ctx={{ sessions: [s], selectedId: "s", names }} skipReturn={{ current: false }} onClose={() => { log.push("palette"); setPalette(false); }} onRun={noop} />
         ) : null}

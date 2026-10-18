@@ -3,6 +3,8 @@ import { clampDock, DOCK_MIN, type DockState } from "../dock";
 
 interface Props {
   dock: DockState;
+  /** False for a finished replay: no Follow live control. */
+  live?: boolean;
   onChange: (next: DockState) => void;
   follow: boolean;
   onFollow: () => void;
@@ -12,7 +14,7 @@ interface Props {
 }
 
 /** Bottom dock: collapsible, resizable by its top edge. Hosts the timeline. */
-export function Dock({ dock, onChange, follow, onFollow, onZoom, onFit, children }: Props) {
+export function Dock({ dock, live = true, onChange, follow, onFollow, onZoom, onFit, children }: Props) {
   const start = useRef<{ y: number; h: number } | null>(null);
   // Live height while dragging; the shared (persisted) state is only written on release.
   const [dragH, setDragH] = useState<number | null>(null);
@@ -71,7 +73,7 @@ export function Dock({ dock, onChange, follow, onFollow, onZoom, onFit, children
         {dock.collapsed ? null : (
           <div className="dock-controls">
             <span className="dock-hint muted">Ctrl + scroll to zoom, drag to pan</span>
-            <button type="button" className={`fchip${follow ? " on" : ""}`} aria-pressed={follow} onClick={onFollow}>Follow live</button>
+            {live ? <button type="button" className={`fchip${follow ? " on" : ""}`} aria-pressed={follow} onClick={onFollow}>Follow live</button> : null}
             <button type="button" className="fchip" aria-label="Zoom out" onClick={() => onZoom(1 / 1.6)}>-</button>
             <button type="button" className="fchip" aria-label="Zoom in" onClick={() => onZoom(1.6)}>+</button>
             <button type="button" className="fchip" onClick={onFit}>Fit</button>

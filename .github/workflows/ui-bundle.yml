@@ -1,17 +1,19 @@
 name: ui-bundle
 
-# Verifies the committed dashboard bundle matches a fresh build of ui/ (SPEC 14.1).
+# Verifies the committed bundles (live dashboard and hub history page) match a fresh build of ui/ (SPEC 14.1).
 
 on:
   push:
     paths:
       - "ui/**"
       - "cc_mission_control/static/**"
+      - "cc_mission_control/hub/static/**"
       - ".github/workflows/ui-bundle.yml"
   pull_request:
     paths:
       - "ui/**"
       - "cc_mission_control/static/**"
+      - "cc_mission_control/hub/static/**"
       - ".github/workflows/ui-bundle.yml"
   workflow_dispatch:
 
@@ -51,14 +53,16 @@ jobs:
         working-directory: ui
         run: npm run build
 
-      - name: Check committed bundle is up to date
+      - name: Check committed bundles are up to date
         run: |
+          bundles="cc_mission_control/static cc_mission_control/hub/static"
           # porcelain output covers modified, deleted and untracked files
-          status="$(git status --porcelain -- cc_mission_control/static)"
+          status="$(git status --porcelain -- $bundles)"
           if [ -n "$status" ]; then
             echo "$status"
-            git diff --stat -- cc_mission_control/static
-            echo "::error::Run \`npm run build\` in ui/ and commit the bundle"
+            git diff --stat -- $bundles
+            git diff --exit-code -- $bundles || true
+            echo "::error::Run \`npm run build\` in ui/ and commit both bundles"
             exit 1
           fi
-          echo "Committed bundle matches the fresh build."
+          echo "Committed bundles match the fresh build."

@@ -134,7 +134,7 @@ def test_host_with_explicit_port_entry(tmp_path):
 
 
 def test_history_page_placeholder_and_static(tmp_path):
-    c = make_client(tmp_path)
+    c = TestClient(create_app(hub_config(tmp_path), store_config=Config(), static_dir=tmp_path / "unbuilt"))
     assert "not built" in c.get("/history").text
     static = tmp_path / "static"
     (static / "assets").mkdir(parents=True)

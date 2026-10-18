@@ -167,3 +167,23 @@ def test_batch_ingest_on_large_session_is_fast(tmp_path):
     start = time.time()
     r = post(client, items[4800:5001])
     assert r.json()["accepted"] == 201 and time.time() - start < 1.0
+
+
+def test_machine_and_session_ids_are_restricted(tmp_path):
+    client = make_client(tmp_path)
+    good = env("hook", 1, hook(1, "SessionStart")[2])
+    ok_ids = ["a", "mach-a", "host.local", "user@host:1", "A_b-c.d", "x" * 128, "..a", "a.."]
+    bad_ids = [".", "..", "a/b", "a b", "a\n", "x" * 129, "\u00e9", "a%2Fb", "a\\b", "a?b", "a#b", "\x00", "../x"]
+    items = []
+    for i, v in enumerate(ok_ids):
+        items.append({**good, "eid": "%032x" % (i + 1), "machine_id": v, "session_id": "s" + str(i)})
+        items.append({**good, "eid": "%032x" % (i + 100), "machine_id": "m", "session_id": v})
+    n_ok = len(items)
+    for i, v in enumerate(bad_ids):
+        items.append({**good, "eid": "%032x" % (i + 1000), "machine_id": v, "session_id": "s"})
+        items.append({**good, "eid": "%032x" % (i + 2000), "machine_id": "m", "session_id": v})
+    r = post(client, items).json()
+    assert r == {"accepted": n_ok, "duplicates": 0, "invalid": 2 * len(bad_ids)}
+    seen = {r["machine_id"] for r in rows(client, "SELECT machine_id FROM records")}
+    seen |= {r["session_id"] for r in rows(client, "SELECT session_id FROM records")}
+    assert not seen & set(bad_ids)

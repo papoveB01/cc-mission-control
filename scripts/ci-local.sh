@@ -18,7 +18,8 @@ Runs the checks from .github/workflows/python.yml and ui-bundle.yml locally:
   2. pytest            Python 3.10, 3.12 and the default interpreter
   3. Slow launcher     CCMC_SLOW_TESTS=1 tests/test_launcher.py
   4. UI                Node 22: npm ci, typecheck, test, build (in ui/)
-  5. Bundle drift      cc_mission_control/static must match the fresh build
+  5. Bundle drift      cc_mission_control/static and cc_mission_control/hub/static
+                       must match the fresh build
 
 Options:
   --quick     default interpreter only; skip the 3.10/3.12 matrix and slow test
@@ -147,15 +148,17 @@ ui_checks() {
 
 # ---- 5. bundle drift --------------------------------------------------------
 bundle_drift() {
-  local status
-  status="$(git status --porcelain -- cc_mission_control/static)"
+  local status bundles="cc_mission_control/static cc_mission_control/hub/static"
+  # shellcheck disable=SC2086 -- the two paths are meant to split
+  status="$(git status --porcelain -- $bundles)"
   if [ -n "$status" ]; then
     echo "$status"
-    git diff --stat -- cc_mission_control/static || true
-    echo "Run \`npm run build\` in ui/ and commit the bundle" >&2
+    # shellcheck disable=SC2086
+    git diff --stat -- $bundles || true
+    echo "Run \`npm run build\` in ui/ and commit both bundles" >&2
     return 1
   fi
-  echo "Committed bundle matches the fresh build."
+  echo "Committed bundles match the fresh build."
 }
 
 # ---- run --------------------------------------------------------------------

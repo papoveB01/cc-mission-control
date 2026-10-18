@@ -11,6 +11,8 @@ from ..state import MAIN, _norm_agent
 
 KINDS = frozenset({"hook", "ctx", "usage", "meta", "title", "cwd"})
 EID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+# machine_id and session_id end up in URLs and file-like keys: a plain, short token (never "." or "..").
+ID_RE = re.compile(r"[A-Za-z0-9._:@-]{1,128}")
 ID_MAX = 128
 LABEL_MAX = 200
 MESSAGE_ID_MAX = 256
@@ -33,7 +35,10 @@ class Record:
 
 
 def _id(value: Any) -> Optional[str]:
-    return value if isinstance(value, str) and 0 < len(value) <= ID_MAX else None
+    """A machine or session id, or None when it is not in the allowed alphabet (fullmatch: no trailing newline)."""
+    if isinstance(value, str) and value not in (".", "..") and ID_RE.fullmatch(value):
+        return value
+    return None
 
 
 def _time(value: Any) -> bool:
