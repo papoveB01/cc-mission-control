@@ -52,7 +52,7 @@ def write(path, *objs, mode="w"):
 
 def test_usage_sums_all_four_fields():
     u = usage_from_entry(asst(inp=10, cc=200, cr=3000, out=40), main=True)
-    assert u == Usage(3250, "claude-sonnet-5")
+    assert u == Usage(3250, "claude-sonnet-5", 10, 200, 3000, 40, None)
 
 
 def test_usage_missing_and_non_int_fields():

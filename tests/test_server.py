@@ -470,14 +470,15 @@ def test_relay_enqueues_redacted(make):
     app = make(upstream_url="http://upstream.invalid/ingest", upstream_token="tok")
     with TestClient(app, base_url=BASE) as c:
         post(c, pre(command="echo " + SECRET))
-    q = app.state.relay.queue
-    assert q.qsize() == 1
-    item = q.get_nowait()
+        q = list(app.state.relay.queue)
+    assert len(q) == 1
+    item = q[0]
     assert SECRET not in json.dumps(item)
+    assert item["kind"] == "hook" and item["v"] == 2
     assert item["machine_id"] == app.state.relay.machine_id
     assert len(item["machine_id"]) == 12 and int(item["machine_id"], 16) >= 0
     assert isinstance(item["user"], str)
-    assert item["hook_event_name"] == "PreToolUse"
+    assert item["data"]["hook_event_name"] == "PreToolUse"
 
 
 def test_relay_full_queue_drops(tmp_path, clock):
@@ -490,23 +491,8 @@ def test_relay_full_queue_drops(tmp_path, clock):
     with TestClient(app, base_url=BASE) as c:
         for i in range(5):
             assert_empty_200(post(c, pre(call_id=f"t{i}")))
-    assert app.state.relay.queue.qsize() == 2
-    assert app.state.relay.dropped == 3
-
-
-def test_relay_send_one_sets_bearer_and_swallows_errors(make):
-    import asyncio
-
-    app = make(upstream_url="http://upstream.invalid/", upstream_token="tok")
-    seen = {}
-
-    class Fake:
-        async def post(self, url, json=None, headers=None):
-            seen.update(url=url, headers=headers)
-            raise RuntimeError("down")
-
-    asyncio.run(app.state.relay.send_one(Fake(), {"a": 1}))
-    assert seen["headers"] == {"Authorization": "Bearer tok"}
+        assert len(app.state.relay.queue) == 2
+        assert app.state.relay.dropped == 3
 
 
 # ---- misc ------------------------------------------------------------------

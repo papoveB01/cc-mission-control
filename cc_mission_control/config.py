@@ -38,6 +38,7 @@ class Config:
     no_browser: bool = False
     upstream_url: str | None = None
     upstream_token: str | None = None
+    spool_mb: int = 200
     dev_origins: tuple[str, ...] = ()
 
     @classmethod
@@ -58,5 +59,6 @@ class Config:
             no_browser=env.get("CCMC_NO_BROWSER", "").strip() == "1",
             upstream_url=env.get("CCMC_UPSTREAM_URL", "").strip() or None,
             upstream_token=env.get("CCMC_UPSTREAM_TOKEN", "").strip() or None,
+            spool_mb=_int(env, "CCMC_SPOOL_MB", 200),
             dev_origins=tuple(o.strip().rstrip("/") for o in dev_origins.split(",") if o.strip()),
         )
