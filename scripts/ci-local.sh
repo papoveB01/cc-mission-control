@@ -3,6 +3,9 @@
 # Run before releases or while GitHub Actions is unavailable. See -h.
 set -euo pipefail
 
+# Keep the developer's settings.json env (real hub URL/token, plugin data dir) out of tests and servers.
+unset CCMC_UPSTREAM_URL CCMC_UPSTREAM_TOKEN CCMC_HUB_TOKEN CLAUDE_PLUGIN_DATA
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 

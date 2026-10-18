@@ -1,3 +1,5 @@
+import os
+
 from pathlib import Path
 
 from cc_mission_control.config import Config
@@ -42,3 +44,12 @@ def test_parsing():
     assert c.no_browser is True
     assert c.dev_origins == ("http://localhost:5173", "http://127.0.0.1:5173")
     assert c.upstream_url is None
+
+
+def test_inherited_upstream_env_is_stripped_by_fixture(monkeypatch):
+    # The autouse fixture in conftest.py removed whatever the parent exported; prove that, and that a
+    # value set inside a test is still honoured.
+    assert "CCMC_UPSTREAM_URL" not in os.environ
+    assert Config.from_env().upstream_url is None
+    monkeypatch.setenv("CCMC_UPSTREAM_URL", "http://127.0.0.1:9/ingest")
+    assert Config.from_env().upstream_url == "http://127.0.0.1:9/ingest"

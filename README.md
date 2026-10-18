@@ -274,6 +274,8 @@ Setup, client configuration, backups, upgrades and troubleshooting: [`deploy/hub
 
 ## Development
 
+Tests strip `CCMC_*` and `CLAUDE_PLUGIN_DATA` from the environment (see `tests/conftest.py`); when running a local server by hand, use `env -u CCMC_UPSTREAM_URL -u CCMC_UPSTREAM_TOKEN` so it never relays to a real hub.
+
 Layout:
 
 ```
