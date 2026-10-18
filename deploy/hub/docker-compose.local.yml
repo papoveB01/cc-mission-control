@@ -1,0 +1,27 @@
+# LOCAL TESTING ONLY. NOT FOR SERVERS.
+# No tailscale; the hub publishes on 127.0.0.1:48318 of THIS machine.
+#   export CCMC_HUB_TOKEN=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
+#   docker compose -f deploy/hub/docker-compose.local.yml up -d --build
+name: ccmc-hub-local
+
+services:
+  hub:
+    build:
+      context: ../..
+      dockerfile: deploy/hub/Dockerfile
+    image: ccmc-hub:local-test
+    environment:
+      CCMC_HUB_TOKEN: ${CCMC_HUB_TOKEN:?set CCMC_HUB_TOKEN (32+ chars)}
+      CCMC_HUB_HOSTS: 127.0.0.1,localhost
+    ports:
+      - "127.0.0.1:48318:4318"
+    volumes:
+      - hub-data:/data
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 512m
+
+volumes:
+  hub-data:

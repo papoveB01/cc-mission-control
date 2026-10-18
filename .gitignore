@@ -13,3 +13,10 @@ keys/
 
 # local CI virtualenvs (scripts/ci-local.sh)
 .ci-venvs/
+
+# hub deployment secrets
+deploy/hub/.env
+.env
+.env.*
+!.env.example
+!**/.env.example

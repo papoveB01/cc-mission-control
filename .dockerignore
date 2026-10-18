@@ -1,0 +1,18 @@
+# ALLOWLIST: nothing enters the build context unless re-included below.
+# keys/ (credentials), .venv, .claude/, ui/node_modules, .git and .env files
+# are therefore excluded by the leading "*".
+*
+
+!pyproject.toml
+!README.md
+!LICENSE
+!NOTICE
+!cc_mission_control/
+!cc_mission_control/**
+!deploy/hub/requirements.lock
+
+**/__pycache__
+**/*.pyc
+**/.env*
+**/*.pem
+**/*.key

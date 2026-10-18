@@ -247,6 +247,10 @@ Claude Code ── SessionStart (command hook) ──► scripts/launch.py ─�
 
 See [`SPEC.md`](SPEC.md) for the full design.
 
+## Remote history (optional)
+
+To keep a searchable history of sessions from several machines, run the hub (a small Docker stack with Tailscale, reachable only over your tailnet) and point each machine at it with `CCMC_UPSTREAM_URL` and `CCMC_UPSTREAM_TOKEN`. Nothing is sent unless you set them. Setup, backups and security notes: [`deploy/hub/README-hub.md`](deploy/hub/README-hub.md).
+
 ## Development
 
 Layout:

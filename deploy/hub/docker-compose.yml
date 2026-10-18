@@ -1,0 +1,73 @@
+# cc-mission-control history hub behind Tailscale.
+#
+# NO `ports:` ANYWHERE, on purpose: nothing is published on the host. The hub is
+# reachable only over the tailnet as http://ccmc-hub.<tailnet>.ts.net:4318
+# (WireGuard-encrypted). The hub shares the tailscale container's network
+# namespace, so it binds 0.0.0.0:4318 inside that namespace only.
+name: ccmc-hub
+
+services:
+  tailscale:
+    image: tailscale/tailscale:v1.102.5
+    hostname: ccmc-hub
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_HOSTNAME: ccmc-hub
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_ENABLE_HEALTH_CHECK: "true"
+      TS_LOCAL_ADDR_PORT: 127.0.0.1:9002
+      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:-}
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    volumes:
+      - ts-state:/var/lib/tailscale
+    restart: unless-stopped
+    mem_limit: 256m
+    pids_limit: 200
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9002/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  hub:
+    build:
+      context: ../..
+      dockerfile: deploy/hub/Dockerfile
+    image: ccmc-hub:0.2.3
+    network_mode: service:tailscale
+    # restart: true restarts the hub when tailscale is restarted by compose; if tailscale
+    # crashes and restarts on its own, run `docker compose -f deploy/hub/docker-compose.yml restart hub`.
+    depends_on:
+      tailscale:
+        condition: service_healthy
+        restart: true
+    # Explicit vars only: the hub must never see TS_AUTHKEY. Values come from deploy/hub/.env.
+    environment:
+      CCMC_HUB_TOKEN: ${CCMC_HUB_TOKEN:?set CCMC_HUB_TOKEN in .env}
+      CCMC_HUB_RETENTION_DAYS: ${CCMC_HUB_RETENTION_DAYS:-0}
+      CCMC_HUB_BACKUPS: ${CCMC_HUB_BACKUPS:-7}
+      CCMC_HUB_HOSTS: ${CCMC_HUB_HOSTS:-}
+    volumes:
+      - hub-data:/data
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+volumes:
+  ts-state:
+  hub-data:
+
+# Compose also creates the project's own default network (ccmc-hub_default).
