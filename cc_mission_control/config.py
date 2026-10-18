@@ -60,3 +60,43 @@ class Config:
             upstream_token=env.get("CCMC_UPSTREAM_TOKEN", "").strip() or None,
             dev_origins=tuple(o.strip().rstrip("/") for o in dev_origins.split(",") if o.strip()),
         )
+
+
+MIN_HUB_TOKEN = 32
+
+
+@dataclass(frozen=True)
+class HubConfig:
+    """CCMC_HUB_* settings (SPEC 13.5), read by the hub process only."""
+
+    token: str | None = field(default=None, repr=False)
+    db: Path = Path("/data/history.db")
+    port: int = 4318
+    bind: str = "0.0.0.0"
+    hosts: tuple[str, ...] = ("ccmc-hub",)
+    tailnet_hosts: bool = False  # also accept ccmc-hub.<tailnet>.ts.net (only when CCMC_HUB_HOSTS is unset)
+    retention_days: int = 0
+    backups: int = 7
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "HubConfig":
+        env = os.environ if env is None else env
+        hosts = tuple(h.strip().lower() for h in env.get("CCMC_HUB_HOSTS", "").split(",") if h.strip())
+        return cls(
+            token=env.get("CCMC_HUB_TOKEN", "").strip() or None,
+            db=Path(env.get("CCMC_HUB_DB", "").strip() or "/data/history.db").expanduser(),
+            port=_int(env, "CCMC_HUB_PORT", 4318),
+            bind=env.get("CCMC_HUB_BIND", "").strip() or "0.0.0.0",
+            hosts=hosts or ("ccmc-hub",),
+            tailnet_hosts=not hosts,
+            retention_days=max(0, _int(env, "CCMC_HUB_RETENTION_DAYS", 0)),
+            backups=max(0, _int(env, "CCMC_HUB_BACKUPS", 7)),
+        )
+
+    def problem(self) -> str | None:
+        """Why the hub must not start with this config, or None."""
+        if not self.token:
+            return "CCMC_HUB_TOKEN is not set; the hub refuses to start without a token"
+        if len(self.token) < MIN_HUB_TOKEN:
+            return f"CCMC_HUB_TOKEN must be at least {MIN_HUB_TOKEN} characters"
+        return None
