@@ -44,7 +44,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/hub/Dockerfile
-    image: ccmc-hub:0.3.0
+    image: ccmc-hub:0.3.1
     network_mode: service:tailscale
     # restart: true restarts the hub when tailscale is restarted by compose; if tailscale
     # crashes and restarts on its own, run `docker compose -f deploy/hub/docker-compose.yml restart hub`.
