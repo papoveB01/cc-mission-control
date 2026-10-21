@@ -323,7 +323,8 @@ File: `scripts/launch.py`. Standard library only, so it starts in milliseconds w
 
 1. Read the SessionStart JSON from stdin.
 2. `GET http://127.0.0.1:4317/health` (timeout 0.5 s). Accept only a response with `"app": "cc-mission-control"`, so an unrelated service on the port is never mistaken for the server.
-3. If not running, start the server detached:
+2a. If the running server reports a `version` older than this plugin's (`$CLAUDE_PLUGIN_ROOT/.claude-plugin/plugin.json`, compared as integer tuples), replace it: read `<data_dir>/server.pid`, and on POSIX confirm with `ps -o command= -p <pid>` that the process is a `cc_mission_control` server. Then send SIGTERM, wait up to 3 s for `/health` to go down (SIGKILL if it hasn't), and continue with step 3. Never replace a server that is the same version or newer, or whose version, pid file or process can't be confirmed; log one stderr line and reuse it. This keeps a plugin update from leaving an old server running while older sessions stay open, and old launchers never downgrade a newer server because they don't compare versions at all. On Windows, log a hint and reuse the server.
+3. If not running (or just stopped in 2a), start the server detached:
    - If `uv` is on PATH: `uv run --quiet --frozen --no-dev --project $CLAUDE_PLUGIN_ROOT python -m cc_mission_control` (`--frozen` so uv never rewrites `uv.lock` inside the plugin cache), with `UV_PROJECT_ENVIRONMENT=$CLAUDE_PLUGIN_DATA/venv` so the virtualenv survives plugin updates.
    - Otherwise, if `fastapi` and `uvicorn` import, run `python -m cc_mission_control` with `PYTHONPATH=$CLAUDE_PLUGIN_ROOT`.
    - Otherwise, print an install hint for uv to stderr and exit 0.
@@ -871,6 +872,7 @@ Build in this order. Each milestone has a done condition.
 | 14 | Docker deploy (13.3) | `docker compose up` on the remote server; hub reachable only over Tailscale; `/health` OK; nothing listening on public interfaces |
 | 15 | History UI (13.4) | List, filters, session replay, Files and Usage panels, file lookup, working against a seeded hub |
 | 16 | Two-machine acceptance, tag v0.3.0 | Real sessions from two machines appear in the hub, with replay, file access and tokens correct; the hub offline for 10 minutes loses nothing |
+| 17 | Launcher replaces an older server (8.1 step 2a), release 0.3.1 | Tests: older version is replaced; same/newer/unparseable version, missing pid file, or a pid that isn't our server is reused; the whole replace path stays inside the hook budget |
 
 **Instruction for Claude Code:** treat this document as the source of truth. Before implementing hooks, confirm current field names against the Claude Code hooks reference (`https://code.claude.com/docs/en/hooks`), since the hook system changes often. Where the docs and this spec disagree on a Claude Code fact, follow the docs and note the change in the README.
 
@@ -924,3 +926,4 @@ Reference: `https://code.claude.com/docs/en/hooks`
 - v0.3.0: Section 13 rewritten from "hosted mode, built later" into remote history. A single-user hub runs in Docker and is reachable only over Tailscale, with SQLite, full replay, token usage, and file and permission indexes. Relay v2 replaces the v0.1 fire-and-forget relay with envelopes, transcript-derived records and a disk spool. Milestones 12–16 added.
 - v0.3 (M15): the history UI also shows a permissions list. Hub ids are limited to a URL-safe character set. The bundle-drift check covers `cc_mission_control/hub/static`. The time scrubber and context history are still deferred, since the hub keeps only peak context.
 - v0.3.0 (M14/M16): the hub is deployed with Docker Compose and a Tailscale sidecar pinned to `v1.102.5`, using `TS_DEBUG_FIREWALL_MODE=nftables` because RHEL-family kernels lack the legacy iptables filter table. The hub container receives only `CCMC_HUB_*`, never `TS_AUTHKEY`. Dependencies are pinned through `deploy/hub/requirements.lock`, exported from `uv.lock`.
+- v0.3.1 (M17): the launcher replaces a running server older than the plugin (8.1 step 2a). Found in M16: after updating to 0.3.0, a session opened before the update restarted a 0.2.3 server, and new sessions kept reusing it.
