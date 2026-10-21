@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -27,6 +28,9 @@ OPENED_MARKER_MAX_AGE = 12 * 3600
 LOG_MAX_BYTES = 5 * 1024 * 1024
 START_WAIT_SECONDS = 15.0
 POLL_SECONDS = 0.25
+REPLACE_TERM_WAIT_SECONDS = 3.0
+REPLACE_KILL_WAIT_SECONDS = 1.0
+PS_TIMEOUT_SECONDS = 1.0
 BROWSER_DEBOUNCE_SECONDS = 15.0
 
 
@@ -170,6 +174,110 @@ def wait_healthy(port: int, proc, deadline: float):
         time.sleep(POLL_SECONDS)
 
 
+def is_windows() -> bool:
+    return os.name == "nt"
+
+
+def parse_version(text):
+    """'0.3.0' -> (0, 3, 0); None when it is not dot-separated integers."""
+    if not isinstance(text, str):
+        return None
+    try:
+        parts = tuple(int(p) for p in text.strip().split("."))
+    except ValueError:
+        return None
+    return parts if parts and all(p >= 0 for p in parts) else None
+
+
+def plugin_version(root):
+    """This plugin's version tuple from .claude-plugin/plugin.json, or None."""
+    try:
+        data = json.loads((Path(root) / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        return parse_version(data.get("version"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def read_pid(data_dir):
+    """The positive int in <data_dir>/server.pid, or None."""
+    try:
+        pid = int((Path(data_dir) / "server.pid").read_text().strip())
+    except (OSError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def is_our_server(pid: int) -> bool:
+    """POSIX: the process was started as `python -m cc_mission_control`."""
+    try:
+        out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=PS_TIMEOUT_SECONDS)
+    except Exception:  # noqa: BLE001
+        return False
+    if out.returncode != 0:
+        return False
+    argv = out.stdout.decode("utf-8", "replace").split()
+    return ("-m", "cc_mission_control") in zip(argv, argv[1:])
+
+
+def is_older(theirs, mine) -> bool:
+    """Strictly older, ignoring trailing zeros (0.3 == 0.3.0)."""
+    if theirs is None or mine is None:
+        return False
+    n = max(len(theirs), len(mine))
+    return theirs + (0,) * (n - len(theirs)) < mine + (0,) * (n - len(mine))
+
+
+def wait_down(port: int, seconds: float) -> bool:
+    """Poll /health every POLL_SECONDS until it is down; True if it went down in time."""
+    end = time.monotonic() + seconds
+    while True:
+        if health(port)[0] == "down":
+            return True
+        if time.monotonic() + POLL_SECONDS > end:
+            return False
+        time.sleep(POLL_SECONDS)
+
+
+def replace_older(cfg: dict, data: dict):
+    """SPEC 8.1 step 2a. None when nothing was signalled (reuse the server as is);
+    otherwise the fresh (state, data) from /health after the attempt."""
+    port = cfg["port"]
+    mine, theirs = plugin_version(cfg["root"]), parse_version(data.get("version"))
+    if not is_older(theirs, mine):
+        return None
+    if is_windows():
+        log("the running server is older than the plugin; stop it manually to upgrade")
+        return None
+    pid = read_pid(cfg["data_dir"])
+    if pid is None:
+        log("the running server is older than the plugin but server.pid is unusable; reusing it")
+        return None
+    if not is_our_server(pid):
+        log(f"pid {pid} is not a cc_mission_control server; reusing the running one")
+        return None
+    state, now = health(port)  # another launcher may have replaced it already
+    if state != "ours" or not is_older(parse_version(now.get("version")), mine):
+        return None
+    log(f"replacing server {data.get('version')} with plugin version {'.'.join(map(str, mine))}")
+    sent = False
+    for sig, wait in ((signal.SIGTERM, REPLACE_TERM_WAIT_SECONDS),
+                      (getattr(signal, "SIGKILL", signal.SIGTERM), REPLACE_KILL_WAIT_SECONDS)):
+        if sent and not is_our_server(pid):
+            break
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError) as exc:
+            log(f"could not stop the old server: {exc!r}; reusing it")
+            break
+        sent = True
+        if wait_down(port, wait):
+            return "down", None
+    else:
+        log("the old server did not stop; reusing it")
+    return health(port) if sent else None
+
+
 def post_event(port: int, event: dict) -> None:
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/hook",
@@ -297,6 +405,8 @@ def main() -> int:
         port = cfg["port"]
         state, data = health(port)
         just_started = False
+        if state == "ours":
+            state, data = replace_older(cfg, data) or (state, data)
         if state == "foreign":
             log(f"port {port} is used by another service; not starting the server "
                 "(set CCMC_PORT and update hooks.json to use a different port)")
