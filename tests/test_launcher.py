@@ -645,3 +645,220 @@ def test_open_stdin_is_bounded(tmp_path):
             f.close()
     assert proc.returncode == 0 and out == b""
     assert elapsed < 10
+
+
+# ---------------------------------------------------------------- replacing an older server (SPEC 8.1 step 2a)
+
+
+def _replace_cfg(tmp_path, plugin="0.3.1", pid="4242"):
+    root, data = tmp_path / "root", tmp_path / "data"
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"version": plugin}))
+    data.mkdir()
+    if pid is not None:
+        (data / "server.pid").write_text(pid)
+    return {"port": 1, "data_dir": data, "root": root}
+
+
+@pytest.fixture
+def replace_env(monkeypatch):
+    """Fake kill/ps/health: the server goes down when it receives signal `down_on` (None = never)."""
+    st = {"signals": [], "alive": True, "down_on": signal.SIGTERM, "ps_ok": True, "kill_exc": None, "version": "0.3.0"}
+
+    def fake_kill(pid, sig):
+        if st["kill_exc"]:
+            raise st["kill_exc"]
+        st["signals"].append((pid, sig))
+        if st["down_on"] is not None and sig == st["down_on"]:
+            st["alive"] = False
+
+    monkeypatch.setattr(launch.os, "kill", fake_kill)
+    monkeypatch.setattr(launch, "is_our_server", lambda pid: st["ps_ok"])
+    monkeypatch.setattr(launch, "health",
+                        lambda port, timeout=0.5: ("ours", {"app": "cc-mission-control", "version": st["version"]}) if st["alive"] else ("down", None))
+    monkeypatch.setattr(launch.time, "sleep", lambda s: None)
+    monkeypatch.setattr(launch, "POLL_SECONDS", 0.001)
+    monkeypatch.setattr(launch, "REPLACE_TERM_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(launch, "REPLACE_KILL_WAIT_SECONDS", 0.02)
+    return st
+
+
+def test_parse_version():
+    assert launch.parse_version("0.3.0") == (0, 3, 0)
+    assert launch.parse_version("0.10.2") > launch.parse_version("0.9.9")
+    for bad in (None, "", "dev", "1.x", "1..2", "-1.0", 3):
+        assert launch.parse_version(bad) is None
+
+
+def test_plugin_version(tmp_path):
+    assert launch.plugin_version(_replace_cfg(tmp_path, "1.2.3")["root"]) == (1, 2, 3)
+    assert launch.plugin_version(tmp_path / "nowhere") is None
+    assert launch.plugin_version(REPO) is not None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX replace path")
+def test_older_server_replaced_sigterm(tmp_path, replace_env):
+    assert launch.replace_older(_replace_cfg(tmp_path), {"version": "0.3.0"}) == ("down", None)
+    assert replace_env["signals"] == [(4242, signal.SIGTERM)]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX replace path")
+def test_sigkill_fallback(tmp_path, replace_env):
+    replace_env["down_on"] = signal.SIGKILL
+    assert launch.replace_older(_replace_cfg(tmp_path), {"version": "0.2.9"}) == ("down", None)
+    assert [s for _, s in replace_env["signals"]] == [signal.SIGTERM, signal.SIGKILL]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX replace path")
+def test_still_up_after_sigkill_is_reused(tmp_path, replace_env, capfd):
+    replace_env["down_on"] = None
+    assert launch.replace_older(_replace_cfg(tmp_path), {"version": "0.3.0"}) [0] == "ours"
+    assert len(replace_env["signals"]) == 2
+    assert "did not stop" in capfd.readouterr().err
+
+
+@pytest.mark.parametrize("server_version", ["0.3.1", "0.3.2", "1.0.0", "garbage", None])
+def test_not_older_is_reused(tmp_path, replace_env, server_version):
+    assert launch.replace_older(_replace_cfg(tmp_path), {"version": server_version}) is None
+    assert replace_env["signals"] == []
+
+
+def test_unparseable_plugin_version_is_reused(tmp_path, replace_env):
+    assert launch.replace_older(_replace_cfg(tmp_path, "dev"), {"version": "0.1.0"}) is None
+    assert replace_env["signals"] == []
+
+
+@pytest.mark.parametrize("pid", [None, "garbage", "0", "-5", ""])
+def test_bad_pid_file_is_reused(tmp_path, replace_env, pid):
+    assert launch.replace_older(_replace_cfg(tmp_path, pid=pid), {"version": "0.3.0"}) is None
+    assert replace_env["signals"] == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX replace path")
+def test_ps_mismatch_is_reused(tmp_path, replace_env):
+    replace_env["ps_ok"] = False
+    assert launch.replace_older(_replace_cfg(tmp_path), {"version": "0.3.0"}) is None
+    assert replace_env["signals"] == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX replace path")
+@pytest.mark.parametrize("exc", [ProcessLookupError(), PermissionError()])
+def test_kill_errors_are_reused(tmp_path, replace_env, exc, capsys):
+    replace_env["kill_exc"] = exc
+    assert launch.replace_older(_replace_cfg(tmp_path), {"version": "0.3.0"}) is None
+    assert "could not stop the old server" in capsys.readouterr().err
+
+
+def test_windows_is_reused(tmp_path, replace_env, monkeypatch, capfd):
+    monkeypatch.setattr(launch, "is_windows", lambda: True)
+    assert launch.replace_older(_replace_cfg(tmp_path), {"version": "0.3.0"}) is None
+    assert replace_env["signals"] == []
+    assert capfd.readouterr().err != ""
+
+
+def test_is_our_server_checks_command(monkeypatch):
+    def fake_run(argv, **kw):
+        assert kw["stdout"] == subprocess.PIPE and kw["stdin"] == subprocess.DEVNULL and kw["timeout"]
+        return subprocess.CompletedProcess(argv, 0, stdout=b"python -m cc_mission_control\n")
+
+    monkeypatch.setattr(launch.subprocess, "run", fake_run)
+    assert launch.is_our_server(7) is True
+    for cmd, ok in ((b"/x/bin/python -m cc_mission_control\n", True),
+                    (b"vim /x/cc_mission_control/a.py\n", False),
+                    (b"python cc_mission_control -m\n", False)):
+        monkeypatch.setattr(launch.subprocess, "run",
+                            lambda argv, cmd=cmd, **kw: subprocess.CompletedProcess(argv, 0, stdout=cmd))
+        assert launch.is_our_server(7) is ok
+    monkeypatch.setattr(launch.subprocess, "run",
+                        lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout=b"vim notes\n"))
+    assert launch.is_our_server(7) is False
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired("ps", 1)
+
+    monkeypatch.setattr(launch.subprocess, "run", boom)
+    assert launch.is_our_server(7) is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX replace path")
+def test_main_replaces_then_starts(inproc, monkeypatch, tmp_path, replace_env, capfd):
+    cfg = _replace_cfg(tmp_path)
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(cfg["root"]))
+    monkeypatch.setenv("CCMC_DATA_DIR", str(cfg["data_dir"]))
+    fake = launch.health  # the replace_env fake: old server until killed
+    started = []
+
+    def health(port, timeout=0.5):
+        state, data = fake(port, timeout)
+        if state == "ours":
+            data = {"app": "cc-mission-control", "version": "0.3.0" if not started else "0.3.1", "clients": 0}
+        return state, data
+
+    def start(c):
+        started.append(1)
+        replace_env["alive"] = True
+        return type("P", (), {"poll": lambda self: None})()
+
+    monkeypatch.setattr(launch, "health", health)
+    monkeypatch.setattr(launch, "start_server", start)
+    assert launch.main() == 0
+    out, _ = capfd.readouterr()
+    assert out == ""
+    assert replace_env["signals"] == [(4242, signal.SIGTERM)]
+    assert started == [1] and inproc["post"]
+
+
+def test_main_same_version_does_not_replace(inproc, monkeypatch, tmp_path, replace_env):
+    cfg = _replace_cfg(tmp_path, "0.3.0")
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(cfg["root"]))
+    monkeypatch.setenv("CCMC_DATA_DIR", str(cfg["data_dir"]))
+    monkeypatch.setattr(launch, "health", lambda port, timeout=0.5: ("ours", {"app": "cc-mission-control", "version": "0.3.0", "clients": 1}))
+    monkeypatch.setattr(launch, "start_server", lambda c: pytest.fail("must not start"))
+    assert launch.main() == 0
+    assert replace_env["signals"] == [] and inproc["post"]
+
+
+def test_trailing_zeros_ignored(tmp_path, replace_env):
+    replace_env["version"] = "0.3"
+    assert launch.replace_older(_replace_cfg(tmp_path, "0.3.0"), {"version": "0.3"}) is None
+    assert replace_env["signals"] == []
+    assert launch.is_older((0, 3), (0, 3, 1)) and not launch.is_older((0, 3, 0), (0, 3))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX replace path")
+def test_health_recheck_aborts_when_no_longer_older(tmp_path, replace_env):
+    replace_env["version"] = "0.3.1"  # another launcher already started the new server
+    assert launch.replace_older(_replace_cfg(tmp_path), {"version": "0.3.0"}) is None
+    assert replace_env["signals"] == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX replace path")
+def test_ps_rechecked_before_sigkill(tmp_path, replace_env, monkeypatch):
+    replace_env["down_on"] = None
+    answers = iter([True, False])  # ours before SIGTERM, gone or reused pid before SIGKILL
+    monkeypatch.setattr(launch, "is_our_server", lambda pid: next(answers))
+    launch.replace_older(_replace_cfg(tmp_path), {"version": "0.3.0"})
+    assert [s for _, s in replace_env["signals"]] == [signal.SIGTERM]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX replace path")
+def test_signalled_but_still_up_main_rechecks_and_starts(inproc, monkeypatch, tmp_path, replace_env):
+    cfg = _replace_cfg(tmp_path)
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(cfg["root"]))
+    monkeypatch.setenv("CCMC_DATA_DIR", str(cfg["data_dir"]))
+    fake = launch.health  # "ours" until the second signal is sent
+    started = []
+
+    def health(port, timeout=0.5):
+        if len(replace_env["signals"]) >= 2:
+            return "down", None  # main's re-check reads a dead port
+        return fake(port, timeout)
+
+    replace_env["down_on"] = None  # signals never take effect
+    monkeypatch.setattr(launch, "health", health)
+    monkeypatch.setattr(launch, "wait_down", lambda port, seconds: False)
+    monkeypatch.setattr(launch, "start_server",
+                        lambda c: started.append(1) or type("P", (), {"poll": lambda self: None})())
+    monkeypatch.setattr(launch, "wait_healthy", lambda port, proc, deadline: {"app": "cc-mission-control", "clients": 0})
+    assert launch.main() == 0
+    assert len(replace_env["signals"]) == 2 and started == [1]

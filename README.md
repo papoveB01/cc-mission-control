@@ -85,7 +85,7 @@ Two caveats:
 
 ### What happens on first start
 
-When a session starts, the `SessionStart` hook runs `scripts/launch.py`. It starts the server if one is not already running, sends it the start event, and opens `http://127.0.0.1:4317/` in your browser. The first run can take a few seconds while uv builds the environment; later starts take milliseconds. The browser opens once: further sessions appear as tabs in the open dashboard, and the browser is not opened on `/clear` or compaction restarts.
+When a session starts, the `SessionStart` hook runs `scripts/launch.py`. It starts the server if one is not already running (or replaces a running one that is older than the plugin, after confirming through `server.pid` and `ps` that it is a cc_mission_control process; on Windows the old server is kept), sends it the start event, and opens `http://127.0.0.1:4317/` in your browser. The first run can take a few seconds while uv builds the environment; later starts take milliseconds. The browser opens once: further sessions appear as tabs in the open dashboard, and the browser is not opened on `/clear` or compaction restarts.
 
 If no browser opens (remote or SSH session, `CCMC_NO_BROWSER=1`, `CLAUDE_CODE_REMOTE=true`, or no `open`/`xdg-open`), go to http://127.0.0.1:4317/ yourself.
 
