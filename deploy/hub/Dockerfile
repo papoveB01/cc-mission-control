@@ -9,7 +9,7 @@ COPY cc_mission_control ./cc_mission_control
 RUN pip wheel --no-cache-dir --no-deps -w /wheels .
 
 FROM python:3.12.14-slim
-ARG VERSION=0.3.1
+ARG VERSION=0.4.0
 LABEL org.opencontainers.image.title="cc-mission-control-hub" \
       org.opencontainers.image.description="Remote history hub for cc-mission-control" \
       org.opencontainers.image.version="${VERSION}" \

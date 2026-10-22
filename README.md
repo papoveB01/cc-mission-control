@@ -6,6 +6,8 @@ A Claude Code plugin that opens a live local dashboard for your session. It show
 
 **Quick start:** in Claude Code run `/plugin marketplace add papoveB01/cc-mission-control`, then `/plugin install cc-mission-control@papoveb01`, then start a new session. The dashboard opens at http://127.0.0.1:4317/. Needs Python 3.10+ and [uv](https://docs.astral.sh/uv/) (see Requirements).
 
+**What's new in 0.4.0:** the Activity feed describes each step in plain language with its result ("Ran the test suite, 489 passed"), with a Plain | Technical toggle. Optional AI summaries add a one- or two-sentence recap after each turn and helper agent (see [AI summaries](#ai-summaries-optional)).
+
 **What's new in 0.3.1:** after a plugin update, the next session replaces the older dashboard server automatically.
 
 **What's new in 0.3.0:** optional remote history. A relay on the local server forwards redacted records to a self-hosted hub (Docker + Tailscale) with a searchable history UI, token usage, file access and permission indexes. Off unless you set `CCMC_UPSTREAM_URL`.
