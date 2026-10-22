@@ -12,6 +12,9 @@ export interface ToolCall {
   ended: number | null;
   duration_ms: number | null;
   subagent_id: string | null;
+  /** Plain-language description and result; absent from older servers. */
+  plain?: string;
+  outcome?: string;
 }
 
 export interface ToolCallDetail extends ToolCall {
@@ -44,6 +47,9 @@ export interface Activity {
   kind: string;
   text: string;
   status: ActivityStatus;
+  /** Plain-language form of `text`, and the call a tool row belongs to; absent from older servers. */
+  plain?: string;
+  call_id?: string;
 }
 
 export type NameSource = "custom" | "generated" | "folder";

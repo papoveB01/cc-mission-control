@@ -916,9 +916,20 @@ code {
   flex-direction: column;
   max-height: calc(100vh - 24px);
 }
-.feed-title {
+.feed-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);
+}
+.feed-view {
+  display: flex;
+  gap: 4px;
+}
+.feed-outcome {
+  color: var(--muted);
 }
 .feed-toolbar {
   padding: 6px 12px;
