@@ -106,6 +106,16 @@ export const ActivityFeed = memo(function ActivityFeed({ activity, names, liveAg
           const status = call ? call.status : feedRowStatus(entry, liveAgents);
           const outcome = call?.outcome?.trim() ?? "";
           const slow = call?.duration_ms != null && call.duration_ms > 1000;
+          if (entry.kind === "summary") {
+            const who = agentName(names, entry.agent_id);
+            return (
+              <li key={key} className="feed-item feed-summary" aria-label={`Summary, ${who}`}>
+                <span className="feed-time tnum">{formatClockSeconds(entry.t)}</span>
+                <span className="feed-agent feed-summary-label">Summary {"\u00b7"} {who}</span>
+                <span className="feed-text feed-summary-text">{entry.text}</span>
+              </li>
+            );
+          }
           return (
           <li key={key} className={`feed-item st-${status}`}>
             <span className="feed-time tnum">{formatClockSeconds(entry.t)}</span>

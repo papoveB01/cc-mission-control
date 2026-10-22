@@ -40,6 +40,10 @@ class Config:
     upstream_token: str | None = None
     spool_mb: int = 200
     dev_origins: tuple[str, ...] = ()
+    summaries: bool = False  # CCMC_SUMMARIES=1 (SPEC 11.6.2); the key itself is never kept in Config
+    summary_key_file: Path | None = None  # None = <data_dir>/summary_api_key
+    summary_model: str = "claude-haiku-5-5"
+    summary_max_per_hour: int = 30
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Config":
@@ -47,6 +51,7 @@ class Config:
         data_dir = env.get("CCMC_DATA_DIR", "").strip()
         redact_file = env.get("CCMC_REDACT_FILE", "").strip()
         dev_origins = env.get("CCMC_DEV_ORIGINS", "")
+        key_file = env.get("CCMC_SUMMARY_KEY_FILE", "").strip()
         return cls(
             port=_int(env, "CCMC_PORT", 4317),
             data_dir=Path(data_dir).expanduser() if data_dir else _default_data_dir(env),
@@ -61,6 +66,10 @@ class Config:
             upstream_token=env.get("CCMC_UPSTREAM_TOKEN", "").strip() or None,
             spool_mb=_int(env, "CCMC_SPOOL_MB", 200),
             dev_origins=tuple(o.strip().rstrip("/") for o in dev_origins.split(",") if o.strip()),
+            summaries=env.get("CCMC_SUMMARIES", "").strip() == "1",
+            summary_key_file=Path(key_file).expanduser() if key_file else None,
+            summary_model=env.get("CCMC_SUMMARY_MODEL", "").strip() or "claude-haiku-5-5",
+            summary_max_per_hour=max(0, _int(env, "CCMC_SUMMARY_MAX_PER_HOUR", 30)),
         )
 
 

@@ -50,6 +50,7 @@ export function matchEntry(f: Filters, e: Activity, liveAgents: ReadonlySet<stri
   if (f.status === "running" && !(e.status === "running" && e.kind === "agent" && liveAgents.has(e.agent_id))) return false;
   if (f.agents.length > 0 && !has(f.agents, e.agent_id)) return false;
   if (f.tools.length > 0) {
+    // an AI summary is not a tool call: a tool filter hides it, otherwise it matches like any row
     const t = entryTool(e);
     if (t === null || !has(f.tools, t)) return false;
   }

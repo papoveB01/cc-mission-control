@@ -130,3 +130,27 @@ describe("filters match plain and technical", () => {
     expect(matchCall(f("pytest", "technical"), c)).toBe(true);
   });
 });
+
+describe("AI summary rows", () => {
+  const summary = (over: Partial<Activity> = {}): Activity => ({
+    t: 1010, agent_id: "main", kind: "summary", text: "Fixed the parser and the tests pass.", status: "info",
+    plain: "Fixed the parser and the tests pass.", span: [1000, 1009], ...over,
+  });
+
+  it("renders a labelled highlighted block in both modes", () => {
+    const { container } = mount([entry(), summary()]);
+    for (const mode of ["Plain", "Technical"]) {
+      fireEvent.click(screen.getByRole("button", { name: mode }));
+      const block = container.querySelector(".feed-summary") as HTMLElement;
+      expect(block.getAttribute("aria-label")).toBe("Summary, Main");
+      expect(block.textContent).toContain("Fixed the parser and the tests pass.");
+    }
+  });
+
+  it("matches text search, and a tool filter hides it", () => {
+    const s = summary();
+    expect(matchEntry({ ...noFilters, text: "parser" }, s, new Set())).toBe(true);
+    expect(matchEntry({ ...noFilters, text: "nomatch" }, s, new Set())).toBe(false);
+    expect(matchEntry({ ...noFilters, tools: ["Bash"] }, s, new Set())).toBe(false);
+  });
+});

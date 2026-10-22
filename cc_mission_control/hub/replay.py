@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import Config
 from ..state import MAIN, Store, _norm_agent
+
+log = logging.getLogger(__name__)
 
 Key = Tuple[float, float, int]  # (t, received, rowid): the replay order
 CACHE_SIZE = 16
@@ -48,12 +51,22 @@ class ReplayState:
         self.prompts: List[str] = []
         self._prompt_chars = 0
         self.permissions: List[tuple] = []  # (agent_id, call_id, tool, kind, text, t)
+        self._warned = False
 
     def apply(self, kind: str, t: float, data: Dict[str, Any], user: str, host: str, key: Key) -> None:
         sid, store = self.session_id, self.store
         self.now = t
         self.last_key = key
         self.user, self.host = user or self.user, host or self.host
+        try:
+            self._dispatch(kind, t, data)
+        except Exception:  # one bad record must never make a session unviewable (no data in the log)
+            if not self._warned:
+                self._warned = True
+                log.warning("skipping a record that failed to replay (kind=%s)", kind)
+
+    def _dispatch(self, kind: str, t: float, data: Dict[str, Any]) -> None:
+        sid, store = self.session_id, self.store
         if kind == "hook":
             event = dict(data, session_id=sid)
             store.ingest(event)
@@ -70,6 +83,8 @@ class ReplayState:
             (store.set_custom_title if data.get("source") == "custom" else store.set_ai_title)(sid, title)
         elif kind == "cwd":
             store.set_project_cwd(sid, data.get("cwd"))
+        elif kind == "summary":  # recorded text only; the hub has no key and never calls the API
+            store.add_summary(sid, data.get("agent_id"), data.get("t_start"), data.get("t_end"), data.get("text"), data.get("model"))
 
     def _note_hook(self, e: Dict[str, Any], t: float) -> None:
         name, redactor = e.get("hook_event_name"), self.store.redactor
