@@ -429,7 +429,7 @@ ToolCallDetail = ToolCall & {
 Activity {
   t: number
   agent_id: string
-  kind: "session" | "prompt" | "tool" | "agent" | "turn" | "error" | "notice" | "compact" | "task"
+  kind: "session" | "prompt" | "tool" | "agent" | "turn" | "error" | "notice" | "compact" | "task" | "summary"
   text: string             // max 240 chars
   status: "info" | "running" | "ok" | "error"
 }
@@ -646,6 +646,67 @@ Behavior: `role="dialog"`, `aria-modal="true"`, labelled by the header; backgrou
 ### Unchanged
 Data contract (9.2/9.3), WS handling, the drawer's detail fetch/inert/focus rules, empty state text, deterministic build and Node 22, server and Python side. No new HTTP endpoints.
 
+## 11.6 Plain-language activity (v0.4.0)
+
+The Activity feed shows what each agent did, and how it went, as a plain sentence instead of the raw command or path. The technical text stays one click away. Two layers: deterministic rules on every row (M18), and optional AI-written summaries per turn and per subagent (M19).
+
+### 11.6.1 Rule-based descriptions (M18)
+
+New module `cc_mission_control/describe.py`, pure functions with no I/O:
+
+- `describe_call(tool, tool_input, cwd) -> str`: what the call does, set on PreToolUse (max 160 chars).
+- `describe_outcome(tool, tool_input, tool_response, error) -> str`: how it went, set on PostToolUse / PostToolUseFailure (max 120 chars; `""` when nothing useful can be said).
+
+Both take already-redacted values, and their results are redacted again before storage. They must never raise: any unexpected shape falls back to the generic rule. `tool_response` shapes are not documented for every tool, so every field access is defensive.
+
+Paths are shown relative to the session `cwd` when inside it, otherwise as `~/…` or the basename with its parent folder.
+
+| Tool | Description (Pre) | Outcome (Post) |
+|---|---|---|
+| Read | `Read <path>` (+ ` (lines a–b)` when offset/limit given) | `N lines` |
+| Write | `Wrote <path>` | `N lines` |
+| Edit / MultiEdit | `Edited <path>` | `+a −r lines` from `structuredPatch` when present, else `updated` |
+| NotebookEdit | `Edited notebook <path>` | `updated` |
+| Bash | The tool's `description` input when present (sentence case); otherwise a classification of the command: tests (`pytest`, `npm test`, `vitest`, `jest`, `go test`, `cargo test`), `git <verb>`, package installs, builds, `docker`/`docker compose`, `curl`/HTTP, `ssh <host>`, file listing, search; else `Ran a shell command` | Test summary parsed from output (`489 passed, 1 skipped`, `2 failed`); for git push/commit the pushed ref or commit subject; on failure `exit code N: <first meaningful stderr line>`; else `done` |
+| Grep | `Searched <path or project> for "<pattern>"` | `N files` / `N matches` / `no matches` |
+| Glob | `Listed files matching <pattern>` | `N files` |
+| WebFetch | `Fetched <domain>` | HTTP status / `fetched` |
+| WebSearch | `Searched the web for "<query>"` | `N results` when countable |
+| Agent / Task | `Started helper agent "<description>" (<type>)` | `finished` |
+| TodoWrite | `Updated the task list` | `N tasks, M done` |
+| Skill | `Used the <skill> skill` | |
+| AskUserQuestion | `Asked you a question` | the chosen answers, when present |
+| `mcp__<server>__<tool>` | `Used <tool> (<server>)`, underscores to spaces | |
+| other | `Used <tool>` | |
+
+Any error outcome is `Failed: <first meaningful line>`; a user rejection is `Declined by you`.
+
+Non-tool activity also gets a plain form: prompt → `You asked: <text>`; subagent start/finish → `Helper agent "<label>" started/finished`; compaction → `Compacting context to free up space` / `Context compacted`; permission denied → `<tool> was not allowed`; turn end → `Finished responding`; session start/end unchanged.
+
+**Data model additions (additive, older clients ignore them):**
+
+```
+ToolCall { ... plain: string, outcome: string }      // outcome "" while running
+Activity { ... plain?: string, call_id?: string }    // call_id on kind "tool" rows
+```
+
+Activity entries stay immutable. A tool row's outcome and final status come from joining `call_id` with the agent's `calls` in the session payload; when the call is no longer in the payload, the row shows `plain` with the inferred status, as today. `text` keeps its current technical form.
+
+**Dashboard:** feed rows show `plain` plus the outcome in muted type (and the duration for calls over 1 s). The feed toolbar gets a `Plain | Technical` toggle, remembered per browser in `localStorage` (wrapped in try/catch, default Plain); Technical shows today's `text`. In Plain mode the row's tooltip carries the technical text. Filters and search match both forms. The History UI shares `HudView`, so it gets this unchanged. Because the hub replays raw hook records through the Store, past sessions gain plain descriptions once the hub runs 0.4.0.
+
+### 11.6.2 AI summaries (M19, opt-in)
+
+Off by default. Enabled only when `CCMC_SUMMARIES=1` **and** an Anthropic API key is found in the file `CCMC_SUMMARY_KEY_FILE` (default `<data_dir>/summary_api_key`, must be mode 0600 or it is ignored with a log line). The key is never read from `ANTHROPIC_API_KEY`: putting that variable in `settings.json` `env` would switch Claude Code itself to API billing and reach every shell.
+
+- **When:** at the end of each main turn (`Stop` / `StopFailure`) with at least 3 activity rows since the prompt, and at each `SubagentStop`.
+- **Input:** the user prompt (≤ 1000 chars), the span's plain activity lines with outcomes (≤ 60 lines, ≤ 6000 chars), and the agent's final result (≤ 1000 chars). All of it is already redacted.
+- **Call:** `POST https://api.anthropic.com/v1/messages` with httpx, model `CCMC_SUMMARY_MODEL` (default `claude-haiku-5-5`), `max_tokens` 200, timeout 20 s, one retry on 429/5xx. The system prompt asks for one or two past-tense sentences (≤ 300 chars) saying what was done and the result, with no speculation and no secrets.
+- **Never on the ingestion path:** a bounded queue (20; oldest dropped and counted) feeds one async worker. A rate cap `CCMC_SUMMARY_MAX_PER_HOUR` (default 30) skips and counts the excess.
+- **Result:** redacted again and appended as an Activity row `kind: "summary"`, `status: "info"`, with `span: [t_start, t_end]`. The feed shows it as a highlighted block above the rows it covers, in both modes.
+- **History:** relayed as envelope kind `summary`, `data: {agent_id, t_start, t_end, text, model}`. The hub stores it and its replay applies it through `Store.add_summary`. Replay never calls the API.
+- **Health:** `/health` gains `summaries: {enabled, sent, failed, skipped, last_error}` when enabled.
+- **Privacy:** the README states that, when enabled, redacted activity text is sent to the Anthropic API.
+
 # 12. Configuration
 
 | Variable | Default | Purpose |
@@ -662,6 +723,10 @@ Data contract (9.2/9.3), WS handling, the drawer's detail fetch/inert/focus rule
 | `CCMC_UPSTREAM_TOKEN` | unset | Bearer token for the upstream |
 | `CCMC_STALE_MINUTES` | `60` | Mark a silent session ended after this long |
 | `CCMC_DEV_ORIGINS` | unset | Extra allowed `Origin` values, for the Vite dev server only |
+| `CCMC_SUMMARIES` | unset | `1` = AI summaries (11.6.2), needs the key file |
+| `CCMC_SUMMARY_KEY_FILE` | `<data_dir>/summary_api_key` | Anthropic API key for summaries (mode 0600) |
+| `CCMC_SUMMARY_MODEL` | `claude-haiku-5-5` | Model for summaries |
+| `CCMC_SUMMARY_MAX_PER_HOUR` | `30` | Summary rate cap |
 
 Python package dependencies: `fastapi>=0.110`, `uvicorn>=0.29`, `websockets>=12`, `httpx>=0.27`; dev: `pytest>=8`. Python 3.10+. Build backend: hatchling. Console script: `ccmc-server = cc_mission_control.__main__:main`. The wheel must include `cc_mission_control/static/**` (hatch `artifacts` or `force-include`), since the built bundle is not Python source.
 
@@ -688,7 +753,7 @@ The v0.1 relay (raw event + `machine_id` + `user`, sent once, dropped on failure
 
 ```json
 { "v": 2, "eid": "<uuid4 hex>", "machine_id": "...", "user": "...", "host": "<hostname, redacted>",
-  "t": 1760000000.123, "kind": "hook" | "ctx" | "usage" | "meta" | "title" | "cwd", "session_id": "...", "data": { ... } }
+  "t": 1760000000.123, "kind": "hook" | "ctx" | "usage" | "meta" | "title" | "cwd" | "summary", "session_id": "...", "data": { ... } }
 ```
 
 `t` is the local server's receive time, and replay uses it as the Store clock. `eid` is unique per record. The hub ignores duplicates, so delivery is at-least-once and safe to retry.
@@ -701,6 +766,7 @@ The v0.1 relay (raw event + `machine_id` + `user`, sent once, dropped on failure
 | `meta` | `apply_subagent_meta` | `{agent_id, agent_type, description, tool_use_id}` |
 | `title` | `set_ai_title` / `set_custom_title` | `{source: "generated" \| "custom", title}` |
 | `cwd` | `set_project_cwd` | `{cwd}` |
+| `summary` | An AI summary is produced (11.6.2) | `{agent_id, t_start, t_end, text, model}` |
 
 Everything is redacted before it is enqueued (redact first, then truncate, as everywhere else).
 
@@ -873,6 +939,8 @@ Build in this order. Each milestone has a done condition.
 | 15 | History UI (13.4) | List, filters, session replay, Files and Usage panels, file lookup, working against a seeded hub |
 | 16 | Two-machine acceptance, tag v0.3.0 | Real sessions from two machines appear in the hub, with replay, file access and tokens correct; the hub offline for 10 minutes loses nothing |
 | 17 | Launcher replaces an older server (8.1 step 2a), release 0.3.1 | Tests: older version is replaced; same/newer/unparseable version, missing pid file, or a pid that isn't our server is reused; the whole replace path stays inside the hook budget |
+| 18 | Plain-language activity rules (11.6.1) | Tests: each tool rule, outcome parsing (pytest/vitest/git/exit codes), defensive fallbacks never raise, redaction of results; UI toggle, outcome join, filters match both forms; replay yields the same plain text |
+| 19 | AI summaries (11.6.2), release 0.4.0 | Tests: disabled without flag or key file, key file permission check, mocked API call, rate cap, queue drop, relay `summary` kind and hub replay without API calls |
 
 **Instruction for Claude Code:** treat this document as the source of truth. Before implementing hooks, confirm current field names against the Claude Code hooks reference (`https://code.claude.com/docs/en/hooks`), since the hook system changes often. Where the docs and this spec disagree on a Claude Code fact, follow the docs and note the change in the README.
 
@@ -927,3 +995,4 @@ Reference: `https://code.claude.com/docs/en/hooks`
 - v0.3 (M15): the history UI also shows a permissions list. Hub ids are limited to a URL-safe character set. The bundle-drift check covers `cc_mission_control/hub/static`. The time scrubber and context history are still deferred, since the hub keeps only peak context.
 - v0.3.0 (M14/M16): the hub is deployed with Docker Compose and a Tailscale sidecar pinned to `v1.102.5`, using `TS_DEBUG_FIREWALL_MODE=nftables` because RHEL-family kernels lack the legacy iptables filter table. The hub container receives only `CCMC_HUB_*`, never `TS_AUTHKEY`. Dependencies are pinned through `deploy/hub/requirements.lock`, exported from `uv.lock`.
 - v0.3.1 (M17): the launcher replaces a running server older than the plugin (8.1 step 2a). Found in M16: after updating to 0.3.0, a session opened before the update restarted a 0.2.3 server, and new sessions kept reusing it.
+- v0.4.0 (M18/M19): Section 11.6 adds plain-language activity: rule-based descriptions and outcomes on every feed row, a Plain/Technical toggle, and opt-in AI summaries per turn and subagent, relayed to the hub as a new envelope kind.
