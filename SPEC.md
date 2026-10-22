@@ -657,7 +657,7 @@ New module `cc_mission_control/describe.py`, pure functions with no I/O:
 - `describe_call(tool, tool_input, cwd) -> str`: what the call does, set on PreToolUse (max 160 chars).
 - `describe_outcome(tool, tool_input, tool_response, error) -> str`: how it went, set on PostToolUse / PostToolUseFailure (max 120 chars; `""` when nothing useful can be said).
 
-Both take already-redacted values, and their results are redacted again before storage. They must never raise: any unexpected shape falls back to the generic rule. `tool_response` shapes are not documented for every tool, so every field access is defensive.
+`describe_call` takes the redacted `tool_input`. `describe_outcome` takes the raw `tool_response` and `error`, because a test summary usually sits at the end of long output that truncation would cut off. Neither clips: the Store redacts each result first and then truncates it (160 / 120 chars), as everywhere else. All parsing is linear-time (whitespace tokenizing, a line-by-line scan of at most the last ~200 lines, no nested quantifiers), since it runs on the event loop and in hub replay. AskUserQuestion outcomes show only the selected option labels; a free-text answer shows as `You typed an answer`. They must never raise: any unexpected shape falls back to the generic rule. `tool_response` shapes are not documented for every tool, so every field access is defensive.
 
 Paths are shown relative to the session `cwd` when inside it, otherwise as `~/…` or the basename with its parent folder.
 
@@ -692,7 +692,7 @@ Activity { ... plain?: string, call_id?: string }    // call_id on kind "tool" r
 
 Activity entries stay immutable. A tool row's outcome and final status come from joining `call_id` with the agent's `calls` in the session payload; when the call is no longer in the payload, the row shows `plain` with the inferred status, as today. `text` keeps its current technical form.
 
-**Dashboard:** feed rows show `plain` plus the outcome in muted type (and the duration for calls over 1 s). The feed toolbar gets a `Plain | Technical` toggle, remembered per browser in `localStorage` (wrapped in try/catch, default Plain); Technical shows today's `text`. In Plain mode the row's tooltip carries the technical text. Filters and search match both forms. The History UI shares `HudView`, so it gets this unchanged. Because the hub replays raw hook records through the Store, past sessions gain plain descriptions once the hub runs 0.4.0.
+**Dashboard:** feed rows show `plain` plus the outcome in muted type (and the duration for calls over 1 s). The feed toolbar gets a `Plain | Technical` toggle, remembered per browser in `localStorage` (wrapped in try/catch, default Plain); Technical shows today's `text`. In Plain mode the row's tooltip carries the technical text. Search matches the visible form: in Plain mode `plain` and the outcome as well as `text`, in Technical mode only the technical text. The History UI shares `HudView`, so it gets this unchanged. Because the hub replays raw hook records through the Store, past sessions gain plain descriptions once the hub runs 0.4.0. The relay truncates hook strings, so a replayed outcome could differ from the live one: the live Store therefore adds its computed, redacted outcome to the relayed PostToolUse / PostToolUseFailure record as `ccmc_outcome`, and a Store applying a record that has `ccmc_outcome` uses it instead of recomputing.
 
 ### 11.6.2 AI summaries (M19, opt-in)
 
