@@ -1,9 +1,9 @@
 import { memo, type ReactNode, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { formatClockSeconds } from "../format";
-import { filtersActive, matchEntry, type Filters } from "../filters";
+import { formatClockSeconds, formatDuration } from "../format";
+import { filtersActive, matchEntry, type FeedView, type Filters } from "../filters";
 import { MiddleText } from "./MiddleText";
 import { agentName, feedItems, feedRowStatus } from "../store";
-import type { Activity } from "../types";
+import type { Activity, ToolCall } from "../types";
 
 const AWAY_PX = 24;
 const STATUS_PREFIX: Record<string, string> = { error: "Failed", running: "Running", ok: "Succeeded" };
@@ -40,12 +40,17 @@ interface Props {
   names: ReadonlyMap<string, string>;
   liveAgents: ReadonlySet<string>;
   onOpenAgent: (id: string, trigger: Element) => void;
+  /** Calls by id, to show the outcome of a tool row. */
+  calls?: ReadonlyMap<string, ToolCall>;
+  view: FeedView;
+  onViewChange: (v: FeedView) => void;
   filters: Filters;
   /** Phase B mounts the filter chips here. */
   toolbar?: ReactNode;
 }
 
-export const ActivityFeed = memo(function ActivityFeed({ activity, names, liveAgents, onOpenAgent, filters, toolbar }: Props) {
+export const ActivityFeed = memo(function ActivityFeed({ activity, names, liveAgents, onOpenAgent, calls, view, onViewChange, filters, toolbar }: Props) {
+  const plainMode = view === "plain";
   const items = useMemo(() => (filtersActive(filters) ? feedItems(activity).filter((i) => matchEntry(filters, i.entry, liveAgents)) : feedItems(activity)), [activity, filters, liveAgents]);
   const scroller = useRef<HTMLOListElement>(null);
   const anchor = useRef<string | null>(null);
@@ -78,7 +83,17 @@ export const ActivityFeed = memo(function ActivityFeed({ activity, names, liveAg
 
   return (
     <aside className="feed panel" aria-label="Activity">
-      <h2 className="feed-title hud-title">Activity</h2>
+      <div className="feed-head">
+        <h2 className="feed-title hud-title">Activity</h2>
+        <div className="feed-view" role="group" aria-label="Activity wording">
+          <button type="button" className={`fchip${plainMode ? " on" : ""}`} aria-pressed={plainMode} onClick={() => onViewChange("plain")}>
+            Plain
+          </button>
+          <button type="button" className={`fchip${plainMode ? "" : " on"}`} aria-pressed={!plainMode} onClick={() => onViewChange("technical")}>
+            Technical
+          </button>
+        </div>
+      </div>
       {toolbar ? <div className="feed-toolbar">{toolbar}</div> : null}
       {fresh > 0 ? (
         <button type="button" className="new-pill" onClick={jump}>
@@ -87,7 +102,10 @@ export const ActivityFeed = memo(function ActivityFeed({ activity, names, liveAg
       ) : null}
       <ol className="feed-list" ref={scroller} onScroll={onScroll} tabIndex={0} aria-label="Activity, newest first">
         {items.map(({ key, entry }) => {
-          const status = feedRowStatus(entry, liveAgents);
+          const call = plainMode && entry.call_id ? calls?.get(entry.call_id) : undefined;
+          const status = call ? call.status : feedRowStatus(entry, liveAgents);
+          const outcome = call?.outcome?.trim() ?? "";
+          const slow = call?.duration_ms != null && call.duration_ms > 1000;
           return (
           <li key={key} className={`feed-item st-${status}`}>
             <span className="feed-time tnum">{formatClockSeconds(entry.t)}</span>
@@ -98,14 +116,16 @@ export const ActivityFeed = memo(function ActivityFeed({ activity, names, liveAg
             ) : (
               <span className="feed-agent">{agentName(names, entry.agent_id)}</span>
             )}
-            <span className="feed-text">
+            <span className="feed-text" title={plainMode ? entry.text : undefined}>
               {STATUS_PREFIX[status] ? <span className="sr-only">{STATUS_PREFIX[status]}: </span> : null}
               {GLYPH[status] ? (
                 <span className="glyph" aria-hidden="true">
                   {GLYPH[status]}{" "}
                 </span>
               ) : null}
-              <WrapPaths text={entry.text} />
+              <WrapPaths text={plainMode ? (entry.plain ?? entry.text) : entry.text} />
+              {outcome ? <span className="feed-outcome"> {"\u2014"} {outcome}</span> : null}
+              {slow && call?.duration_ms != null ? <span className="feed-outcome tnum"> {"\u00b7"} {formatDuration(call.duration_ms)}</span> : null}
             </span>
           </li>
           );

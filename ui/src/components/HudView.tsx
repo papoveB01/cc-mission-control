@@ -14,7 +14,7 @@ import { Telemetry } from "./Telemetry";
 import { Timeline, type Reveal, type TimelineInfo } from "./Timeline";
 import { Topology } from "./Topology";
 import { defaultDock, loadDock, saveDock, type DockState } from "../dock";
-import { loadFilters, noFilters, pruneFilters, saveFilters, safeStorage, type Filters } from "../filters";
+import { loadFeedView, loadFilters, noFilters, saveFeedView, type FeedView, pruneFilters, saveFilters, safeStorage, type Filters } from "../filters";
 import { scrollBehavior } from "../motion";
 import type { PaletteContext, PaletteItem } from "../palette";
 import { dispatchKey, isTypingTarget, type ShortcutAction } from "../shortcuts";
@@ -117,6 +117,19 @@ export function HudView({ session: input, live, callDetailUrl, sessions: session
   // eslint-disable-next-line react-hooks/exhaustive-deps -- depends only on liveKey
   const liveAgents = useMemo(() => (live ? liveAgentIds(agents) : NO_LIVE), [liveKey, live]);
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const callsById = useMemo(() => {
+    const m = new Map<string, ToolCall>();
+    for (const a of agents) for (const c of a.calls) m.set(c.id, c);
+    return m;
+  }, [session?.agents]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const [feedView, setFeedView] = useState<FeedView>(() => loadFeedView());
+  const changeFeedView = useCallback((v: FeedView) => {
+    setFeedView(v);
+    saveFeedView(v);
+  }, []);
+
   const toolKey = [...new Set(agents.flatMap((a) => Object.keys(a.tool_counts)))].sort().join("\u0001");
   const toolOptions = useMemo(() => (toolKey ? toolKey.split("\u0001") : []), [toolKey]);
   const agentOptions = useMemo(() => agents.map((a) => ({ id: a.id, label: names.get(a.id) ?? a.label })), [names, namesKey]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -126,6 +139,7 @@ export function HudView({ session: input, live, callDetailUrl, sessions: session
     () => pruneFilters(filters, new Set(agentOptions.map((a) => a.id)), new Set(toolOptions)),
     [filters, agentOptions, toolOptions],
   );
+  const matchFilters = useMemo<Filters>(() => ({ ...activeFilters, view: feedView }), [activeFilters, feedView]);
 
   // The browser tab shows the selected session's name.
   const docName = session ? sessionName(session) : null;
@@ -457,7 +471,7 @@ export function HudView({ session: input, live, callDetailUrl, sessions: session
                       agent={a}
                       sessionEnded={session.status === "ended" ? (session.ended ?? session.last_event) : null}
                       highlighted={highlight === a.id}
-                      filters={activeFilters}
+                      filters={matchFilters}
                       onOpenCall={onOpenCall}
                       onOpenAgent={onOpenAgent}
                     />
@@ -468,7 +482,10 @@ export function HudView({ session: input, live, callDetailUrl, sessions: session
                 activity={session.activity}
                 names={names}
                 liveAgents={liveAgents}
-                filters={activeFilters}
+                calls={callsById}
+                view={feedView}
+                onViewChange={changeFeedView}
+                filters={matchFilters}
                 onOpenAgent={onOpenAgent}
                 toolbar={<FeedFilters filters={activeFilters} onChange={setFilters} agentOptions={agentOptions} toolOptions={toolOptions} stale={pruned > 0} />}
               />
@@ -476,7 +493,7 @@ export function HudView({ session: input, live, callDetailUrl, sessions: session
                 <Timeline
                   session={session}
                   names={names}
-                  filters={activeFilters}
+                  filters={matchFilters}
                   state={tl}
                   dispatch={tlDispatch}
                   fitPending={fitPending}

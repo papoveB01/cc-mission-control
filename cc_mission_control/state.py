@@ -12,6 +12,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
+from . import describe
 from .config import Config
 from .redact import Redactor, truncate
 
@@ -65,6 +66,8 @@ class Call:
     error: Optional[str] = None
     synthetic: bool = False  # closed by us, not by a Post event
     counted: bool = False  # the synthetic close incremented agent.errors
+    plain: str = ""  # plain-language description (set at Pre)
+    outcome: str = ""  # plain-language result; "" while running
 
     def to_dict(self, detail: bool = False) -> dict:
         d: Dict[str, Any] = {
@@ -77,6 +80,8 @@ class Call:
             "ended": self.ended,
             "duration_ms": self.duration_ms,
             "subagent_id": self.subagent_id,
+            "plain": self.plain,
+            "outcome": self.outcome,
         }
         if detail:
             d.update(input=self.input, output=self.output, error=self.error)
@@ -533,8 +538,31 @@ class Store:
                 agent.status, agent.ended = "running", None
         return agent
 
-    def _act(self, s: Session, now: float, agent_id: str, kind: str, text: str, status: str) -> None:
-        s.activity.append({"t": now, "agent_id": agent_id, "kind": kind, "text": self.redactor.redact(text)[:ACTIVITY_CHARS], "status": status})
+    def _act(
+        self, s: Session, now: float, agent_id: str, kind: str, text: str, status: str,
+        plain: Optional[str] = None, call_id: Optional[str] = None,
+    ) -> None:
+        text = self.redactor.redact(text)[:ACTIVITY_CHARS]
+        entry = {"t": now, "agent_id": agent_id, "kind": kind, "text": text, "status": status}
+        entry["plain"] = text if plain is None else self.redactor.redact(plain)[:ACTIVITY_CHARS]
+        if call_id:
+            entry["call_id"] = call_id
+        s.activity.append(entry)
+
+    def _plain(self, text: str, limit: int) -> str:
+        """Redact first, then clip, so a cut can never expose part of a secret."""
+        return describe.clip(self.redactor.redact(text), limit)
+
+    def _set_outcome(self, call: Call, e: dict, resp: Any, error: Any, fixed: Optional[str] = None) -> None:
+        """Set the call's outcome. The relay truncates hook strings, so the live result travels with the
+        event as `ccmc_outcome` and a replay (the hub) reuses it instead of recomputing from cut-down text."""
+        carried = e.get("ccmc_outcome")
+        if isinstance(carried, str):
+            text = carried
+        else:
+            text = fixed if fixed is not None else describe.describe_outcome(call.tool, call.input, resp, error)
+        call.outcome = self._plain(text, describe.OUTCOME_MAX)
+        e["ccmc_outcome"] = call.outcome
 
     def _find_call(self, s: Session, call_id: str) -> Optional[Call]:
         for a in s.agents.values():
@@ -593,7 +621,7 @@ class Store:
         return out + mark + err
 
     def _make_call(self, s: Session, agent: Agent, e: dict, now: float) -> Call:
-        call = self._build_call(agent.id, e, now)
+        call = self._build_call(agent.id, e, now, s.cwd)
         evicted = agent.add_call(call)
         if evicted is not None:
             self._drop_links(s, evicted.id)
@@ -629,7 +657,7 @@ class Store:
         agent.spawn_call_id = spawn["tool_use_id"]
         self._link_call(s, agent.spawn_call_id, agent.id)
 
-    def _build_call(self, agent_id: str, e: dict, now: float) -> Call:
+    def _build_call(self, agent_id: str, e: dict, now: float, cwd: str = "") -> Call:
         tool_input = e.get("tool_input")
         if isinstance(tool_input, dict):
             stored = self.redactor.value(tool_input)
@@ -643,6 +671,7 @@ class Store:
             started=now,
             input=stored,
         )
+        call.plain = self._plain(describe.describe_call(call.tool, stored, cwd), describe.CALL_MAX)
         return call
 
     def _match(self, s: Session, agent: Agent, e: dict, now: float) -> Call:
@@ -670,6 +699,7 @@ class Store:
             for c in a.calls:
                 if c.status == "running":
                     c.status, c.ended, c.error = "error", now, "Session ended"
+                    c.outcome = "Session ended"
                     c.synthetic, c.counted = True, False
                     c.duration_ms = max(0, int((now - c.started) * 1000))
             if a.id == MAIN:
@@ -711,7 +741,7 @@ class Store:
         if command is not None:
             # A typed slash command is real user input: show it as the task, like a normal prompt.
             main.task = self.redactor.text(command)
-            self._act(s, now, MAIN, "prompt", main.task, "info")
+            self._act(s, now, MAIN, "prompt", main.task, "info", plain=describe.plain_prompt(main.task))
             return
         # A command-tag prompt that does not parse falls through to the plain-prompt path below.
         if m and m.group(1) not in COMMAND_TAGS:
@@ -728,7 +758,7 @@ class Store:
                 self._act(s, now, MAIN, "notice", "System message", "info")
             return
         main.task = self.redactor.text(prompt) if isinstance(prompt, str) else main.task
-        self._act(s, now, MAIN, "prompt", main.task, "info")
+        self._act(s, now, MAIN, "prompt", main.task, "info", plain=describe.plain_prompt(main.task))
 
     @staticmethod
     def _slash_command(prompt: str) -> Optional[str]:
@@ -765,10 +795,12 @@ class Store:
             if c.status != "running":
                 continue
             c.status, c.ended, c.error = "error", now, UNREPORTED
+            c.outcome = "Blocked or cancelled"
             c.duration_ms = max(0, int((now - c.started) * 1000))
             c.synthetic = c.counted = True
             agent.errors += 1
-            self._act(s, now, agent.id, "error", f"{c.tool} blocked or cancelled", "error")
+            self._act(s, now, agent.id, "error", f"{c.tool} blocked or cancelled", "error",
+                      plain=self._plain(f"{c.plain or c.tool} — blocked or cancelled", ACTIVITY_CHARS))
 
     def _h_pre_tool(self, s: Session, e: dict, aid: str, now: float) -> None:
         agent = self._agent(s, aid, now, e.get("agent_type"), revive=True)
@@ -776,8 +808,8 @@ class Store:
             agent.status = "running"
         existing = self._find_call(s, self._ident(e.get("tool_use_id")) or "")
         if existing is not None:
-            fresh = self._build_call(aid, e, now)
-            existing.summary, existing.input = fresh.summary, fresh.input
+            fresh = self._build_call(aid, e, now, s.cwd)
+            existing.summary, existing.input, existing.plain = fresh.summary, fresh.input, fresh.plain
             return
         call = self._make_call(s, agent, e, now)
         if call.tool in SPAWN_TOOLS:
@@ -791,7 +823,7 @@ class Store:
             s.spawns[call.id] = spawn
             s.pending.append(spawn)
             self._trim_spawns(s)
-        self._act(s, now, aid, "tool", f"{call.tool}: {call.summary}", "running")
+        self._act(s, now, aid, "tool", f"{call.tool}: {call.summary}", "running", plain=call.plain, call_id=call.id)
 
     def _h_post_tool(self, s: Session, e: dict, aid: str, now: float) -> None:
         agent = self._agent(s, aid, now, e.get("agent_type"))
@@ -804,6 +836,7 @@ class Store:
             call.error, call.synthetic, call.counted = None, False, False
         resp = e.get("tool_response")
         call.output = self._output(resp)
+        self._set_outcome(call, e, resp, None)
         if call.tool in SPAWN_TOOLS and isinstance(resp, dict):
             label = {"async_launched": "Launched in background", "completed": "Completed"}.get(resp.get("status"))
             if label and not _has_text(resp):
@@ -844,9 +877,11 @@ class Store:
         self._drop_spawn(s, call)
         if e.get("is_interrupt") is True:
             text = f"{call.tool} interrupted"
+            self._set_outcome(call, e, None, None, fixed="Interrupted")
         else:
             text = f"{call.tool} failed: {_first_line(call.error)}"
-        self._act(s, now, aid, "error", text, "error")
+            self._set_outcome(call, e, None, err if err else (call.error or "Failed"))
+        self._act(s, now, aid, "error", text, "error", plain=f"{call.plain or call.tool} — {call.outcome}")
 
     def _count_error(self, s: Session, agent: Agent, call: Call) -> None:
         """Count a real failure once, even if a synthetic close already counted it."""
@@ -858,11 +893,17 @@ class Store:
     def _start_text(self, agent: Agent) -> str:
         return f"{agent.label} started" + (f": {agent.task}" if agent.task else "")
 
+    @staticmethod
+    def _helper_name(agent: Agent) -> str:
+        task = _first_line(agent.task)
+        return task[:80] if task else agent.label
+
     def _refresh_start(self, s: Session, agent: Agent) -> None:
         """Keep a lane's "started" feed entry in step with its (re)linked task."""
         entry = agent.start_entry
         if entry is not None and any(x is entry for x in s.activity):
             entry["text"] = self.redactor.redact(self._start_text(agent))[:ACTIVITY_CHARS]
+            entry["plain"] = self._plain(describe.plain_helper(self._helper_name(agent), "started"), ACTIVITY_CHARS)
 
     def _drop_spawn(self, s: Session, call: Call) -> None:
         """A spawn call that failed or was denied will never get a lane."""
@@ -882,7 +923,8 @@ class Store:
         call.error = f"Denied: {reason}" if reason else "Denied"
         self._count_error(s, agent, call)
         self._drop_spawn(s, call)
-        self._act(s, now, aid, "error", f"{call.tool} denied", "error")
+        call.outcome = self._plain(f"Not allowed: {reason}" if reason else "Not allowed", describe.OUTCOME_MAX)
+        self._act(s, now, aid, "error", f"{call.tool} denied", "error", plain=describe.plain_denied(call.tool))
 
     def _h_subagent_start(self, s: Session, e: dict, aid: str, now: float) -> None:
         if aid == MAIN:
@@ -900,7 +942,8 @@ class Store:
             self._link(s, agent, "", linked)
         elif agent.spawn_call_id is None and not agent.meta_linked:
             self._fifo(s, agent)
-        self._act(s, now, aid, "agent", self._start_text(agent), "running")
+        self._act(s, now, aid, "agent", self._start_text(agent), "running",
+                  plain=describe.plain_helper(self._helper_name(agent), "started"))
         agent.start_entry = s.activity[-1]
 
     def _h_subagent_stop(self, s: Session, e: dict, aid: str, now: float) -> None:
@@ -911,7 +954,8 @@ class Store:
             s.stopped[aid] = now
             while len(s.stopped) > LINK_CAP:
                 del s.stopped[next(iter(s.stopped))]
-            self._act(s, now, MAIN, "agent", f"{kind} finished" if kind else "Background agent finished", "ok")
+            self._act(s, now, MAIN, "agent", f"{kind} finished" if kind else "Background agent finished", "ok",
+                      plain=describe.plain_helper(kind, "finished") if kind else "Background helper agent finished")
             return
         agent = self._agent(s, aid, now, e.get("agent_type"))
         agent.status, agent.ended = "done", now
@@ -920,12 +964,13 @@ class Store:
         if isinstance(msg, str):
             agent.result = self.redactor.text(msg)
         agent.transcript_path = _str(e.get("agent_transcript_path")) or agent.transcript_path
-        self._act(s, now, aid, "agent", f"{agent.label} finished", "ok")
+        self._act(s, now, aid, "agent", f"{agent.label} finished", "ok",
+                  plain=describe.plain_helper(self._helper_name(agent), "finished"))
 
     def _h_stop(self, s: Session, e: dict, aid: str, now: float) -> None:
         s.agents[MAIN].status = "idle"
         self._close_unreported(s, s.agents[MAIN], now)
-        self._act(s, now, MAIN, "turn", "Turn finished", "ok")
+        self._act(s, now, MAIN, "turn", "Turn finished", "ok", plain=describe.TURN_FINISHED)
 
     def _h_stop_failure(self, s: Session, e: dict, aid: str, now: float) -> None:
         s.agents[MAIN].status = "error"
@@ -947,11 +992,12 @@ class Store:
 
     def _h_pre_compact(self, s: Session, e: dict, aid: str, now: float) -> None:
         trigger = self._ident(e.get("trigger"))
-        self._act(s, now, MAIN, "compact", f"Compacting context ({trigger})" if trigger else "Compacting context", "info")
+        self._act(s, now, MAIN, "compact", f"Compacting context ({trigger})" if trigger else "Compacting context", "info",
+                  plain=describe.COMPACTING)
 
     def _h_post_compact(self, s: Session, e: dict, aid: str, now: float) -> None:
         s.compactions += 1
-        self._act(s, now, MAIN, "compact", "Context compacted", "ok")
+        self._act(s, now, MAIN, "compact", "Context compacted", "ok", plain=describe.COMPACTED)
 
     def _h_task_created(self, s: Session, e: dict, aid: str, now: float) -> None:
         subject = e.get("task_subject")

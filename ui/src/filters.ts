@@ -7,6 +7,8 @@ export interface Filters {
   agents: string[];
   tools: string[];
   text: string;
+  /** Which wording the feed shows; not persisted with the filters. Plain when absent. */
+  view?: FeedView;
 }
 
 export const noFilters: Filters = { status: "all", agents: [], tools: [], text: "" };
@@ -18,13 +20,14 @@ export const activeFilterCount = (f: Filters): number => (f.status !== "all" ? 1
 const has = (list: readonly string[], v: string): boolean => list.includes(v);
 
 /** Does a tool call match the filters? Used for dimming lane rows and timeline bars. */
-export function matchCall(f: Filters, call: Pick<ToolCall, "agent_id" | "tool" | "summary" | "status">): boolean {
+export function matchCall(f: Filters, call: Pick<ToolCall, "agent_id" | "tool" | "summary" | "status" | "plain" | "outcome">): boolean {
   if (f.status === "errors" && call.status !== "error") return false;
   if (f.status === "running" && call.status !== "running") return false;
   if (f.agents.length > 0 && !has(f.agents, call.agent_id)) return false;
   if (f.tools.length > 0 && !has(f.tools, call.tool)) return false;
   const q = f.text.trim().toLowerCase();
-  return q === "" || call.tool.toLowerCase().includes(q) || call.summary.toLowerCase().includes(q);
+  if (q === "" || call.tool.toLowerCase().includes(q) || call.summary.toLowerCase().includes(q)) return true;
+  return f.view !== "technical" && ((call.plain ?? "").toLowerCase().includes(q) || (call.outcome ?? "").toLowerCase().includes(q));
 }
 
 /** Tool name of a tool activity entry ("Bash: pytest" -> "Bash"), else null. */
@@ -51,10 +54,31 @@ export function matchEntry(f: Filters, e: Activity, liveAgents: ReadonlySet<stri
     if (t === null || !has(f.tools, t)) return false;
   }
   const q = f.text.trim().toLowerCase();
-  return q === "" || e.text.toLowerCase().includes(q);
+  if (q === "" || e.text.toLowerCase().includes(q)) return true;
+  return f.view !== "technical" && (e.plain ?? "").toLowerCase().includes(q);
 }
 
 export const FILTER_KEY = "ccmc.filters";
+export const FEED_VIEW_KEY = "ccmc.feedView";
+
+export type FeedView = "plain" | "technical";
+
+/** Remembered Activity feed mode; anything unexpected (or storage that throws) means Plain. */
+export function loadFeedView(storage: StorageLike | null = safeStorage()): FeedView {
+  try {
+    return storage?.getItem(FEED_VIEW_KEY) === "technical" ? "technical" : "plain";
+  } catch {
+    return "plain";
+  }
+}
+
+export function saveFeedView(v: FeedView, storage: StorageLike | null = safeStorage()): void {
+  try {
+    storage?.setItem(FEED_VIEW_KEY, v);
+  } catch {
+    /* storage unavailable or full */
+  }
+}
 
 interface StorageLike {
   getItem(k: string): string | null;
