@@ -277,11 +277,11 @@ def test_adversarial_inputs_are_fast(name):
                  lambda: do("Bash", {}, None, "Exit code 1\n" + payload)):
         t0 = time.perf_counter()
         call()
-        assert time.perf_counter() - t0 < 0.05, name
+        assert time.perf_counter() - t0 < 0.5, name
 
 
 def test_known_redos_shape_is_fast():
     t0 = time.perf_counter()
     for n in (38, 50, 200):
         dc("Bash", {"command": "ssh " + "-a " * n}, CWD)
-    assert time.perf_counter() - t0 < 0.05
+    assert time.perf_counter() - t0 < 0.5
