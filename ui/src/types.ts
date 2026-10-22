@@ -50,6 +50,8 @@ export interface Activity {
   /** Plain-language form of `text`, and the call a tool row belongs to; absent from older servers. */
   plain?: string;
   call_id?: string;
+  /** kind "summary" (AI summary, SPEC 11.6.2): the time range of the rows it covers. */
+  span?: [number, number];
 }
 
 export type NameSource = "custom" | "generated" | "folder";

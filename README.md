@@ -197,6 +197,10 @@ All settings are environment variables, read when the server starts.
 | `CCMC_UPSTREAM_URL` | unset | Forward redacted records to this URL as JSON arrays of v2 envelopes. Off by default; when unset, nothing is created or sent. Records are spooled to `<data dir>/relay/` and retried with backoff until the upstream accepts them. |
 | `CCMC_UPSTREAM_TOKEN` | unset | Bearer token sent to the upstream. |
 | `CCMC_SPOOL_MB` | `200` | Cap on the relay spool on disk. Past it, the oldest segments are deleted and counted as dropped (shown in `/health`). |
+| `CCMC_SUMMARIES` | unset | `1` = AI summaries of each turn and subagent (see AI summaries). Also needs the key file. |
+| `CCMC_SUMMARY_KEY_FILE` | `<data dir>/summary_api_key` | File holding the Anthropic API key for summaries. Ignored, with a log line, unless it is a regular file with no group or other permissions (mode 0600). |
+| `CCMC_SUMMARY_MODEL` | `claude-haiku-5-5` | Model used for summaries. |
+| `CCMC_SUMMARY_MAX_PER_HOUR` | `30` | Rate cap per rolling hour. Excess requests are skipped and counted in `/health`. |
 | `CCMC_DEV_ORIGINS` | unset | Comma-separated extra allowed `Origin` values, for the Vite dev server only (for example `http://localhost:5173`). |
 | `CCMC_LAUNCH_DEADLINE` | `17` | Launcher only. Seconds after which the `SessionStart` launcher gives up and exits 0, so it always finishes inside the hook's 20 second timeout. |
 
@@ -250,6 +254,24 @@ Claude Code ── SessionStart (command hook) ──► scripts/launch.py ─�
 - **Updates.** The server keeps state in memory, batches changes every 150 ms and pushes them to the browser over a WebSocket. Nothing is persisted; restarting the server clears the view.
 
 See [`SPEC.md`](SPEC.md) for the full design.
+
+## AI summaries (optional)
+
+Off by default. When on, the dashboard adds a one or two sentence, past-tense summary at the end of each main turn (only if it had at least 3 activity rows) and when each subagent finishes. It appears in the Activity feed as a highlighted "Summary" block, in both Plain and Technical modes, and is relayed to the hub so history shows it too. The hub never calls the API.
+
+To enable it:
+
+```bash
+umask 077
+mkdir -p ~/.cc-mission-control && printf '%s' 'YOUR_ANTHROPIC_API_KEY' > ~/.cc-mission-control/summary_api_key
+```
+
+Then add `"CCMC_SUMMARIES": "1"` to the `env` block of `~/.claude/settings.json` and restart Claude Code. Use `CCMC_SUMMARY_KEY_FILE` for another location (the default is `summary_api_key` in the data dir). If the flag is set but the file is missing or readable by group or others, summaries stay off and one line is logged (never the key). `/health` shows a `summaries` block (`enabled`, `sent`, `failed`, `skipped`, `last_error`).
+
+- **Model and cost.** `claude-haiku-5-5` by default (`CCMC_SUMMARY_MODEL`). Each summary is one small request (at most about 8,000 characters in, 200 tokens out) billed to your Anthropic API account, at most `CCMC_SUMMARY_MAX_PER_HOUR` (30) per hour.
+- **Privacy.** When enabled, redacted activity text is sent to the Anthropic API: your prompt (first 1,000 characters), the plain-language activity lines with their outcomes (up to 60 lines), and the agent's final message (first 1,000 characters). Redaction is best effort, as everywhere else in this tool. Leave it off if that is not acceptable.
+- **Why not `ANTHROPIC_API_KEY`.** The key is never read from that variable. Putting `ANTHROPIC_API_KEY` in `settings.json` `env` would switch Claude Code itself to API billing and expose the key to every shell it starts. A separate 0600 file keeps the key scoped to this feature.
+- **Never blocks.** Requests go through a small queue (20, oldest dropped) and one background worker, with a 20 second timeout and one retry on 429, 5xx or network errors. A failed request adds no row.
 
 ## Remote history (optional)
 

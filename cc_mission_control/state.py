@@ -15,6 +15,7 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 from . import describe
 from .config import Config
 from .redact import Redactor, truncate
+from .summarize import SUMMARY_CHARS as SUMMARY_TEXT_CHARS, SummaryRequest
 
 log = logging.getLogger(__name__)
 
@@ -281,6 +282,9 @@ class Store:
         self._changed: set = set()
         self._seq = 0
         self._lock = threading.RLock()
+        # Set by the live server when AI summaries are enabled (SPEC 11.6.2). It only enqueues, so
+        # the ingestion path never waits. A replaying Store (the hub) leaves it None: no API calls.
+        self.summary_sink: Optional[Callable[[SummaryRequest], None]] = None
 
     # ---- sanitizing -------------------------------------------------------
 
@@ -548,6 +552,81 @@ class Store:
         if call_id:
             entry["call_id"] = call_id
         s.activity.append(entry)
+
+    def add_summary(self, session_id: str, agent_id: Any, t_start: Any, t_end: Any, text: Any, model: Any = None) -> Optional[str]:
+        """Append an AI summary row (SPEC 11.6.2). Also used by hub replay.
+
+        Returns the stored body (redacted, clipped), or None when ignored (session gone, bad text).
+        Never raises: this runs inside hub replay, where one bad record must not break a session."""
+        try:
+            if not isinstance(text, str) or not text.strip():
+                return None
+            aid = agent_id[:128] if isinstance(agent_id, str) and agent_id else MAIN
+            with self._lock:
+                s = self._sessions.get(session_id)
+                if s is None:
+                    return None
+                body = self.redactor.redact(text).strip()[:SUMMARY_TEXT_CHARS]
+                if not body:
+                    return None
+                now = self.clock()
+                nums = [self._span_time(v, now) for v in (t_start, t_end)]
+                entry = {"t": now, "agent_id": self._aid(aid), "kind": "summary", "text": body,
+                         "status": "info", "plain": body, "span": nums}
+                s.activity.append(entry)
+                self._changed.add(session_id)
+                return body
+        except Exception:
+            log.debug("add_summary failed", exc_info=True)
+            return None
+
+    @staticmethod
+    def _span_time(value: Any, fallback: float) -> float:
+        try:
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                v = float(value)
+                if math.isfinite(v):
+                    return v
+        except (OverflowError, ValueError, TypeError):
+            pass
+        return fallback
+
+    def _request_summary(self, s: Session, aid: str, now: float, final: Any) -> None:
+        """Queue a summary request for a finished turn (aid == MAIN) or subagent. Never raises."""
+        sink = self.summary_sink
+        if sink is None:
+            return
+        try:
+            rows = list(s.activity)
+            if aid == MAIN:
+                start = 0
+                for i in range(len(rows) - 1, -1, -1):
+                    if rows[i]["kind"] == "prompt" and rows[i]["agent_id"] == MAIN:
+                        start = i
+                        break
+                t0 = rows[start]["t"] if rows and rows[start]["kind"] == "prompt" else (rows[0]["t"] if rows else now)
+                span = [r for r in rows[start:] if r["kind"] not in ("prompt", "summary", "turn")]
+                prompt = s.agents[MAIN].task
+                if len(span) < 3:
+                    return
+            else:
+                agent = s.agents[aid]
+                t0 = agent.started
+                span = [r for r in rows if r["agent_id"] == aid and r["t"] >= t0 and r["kind"] not in ("agent", "summary")]
+                prompt = agent.task
+            lines = []
+            for r in span:
+                line = r.get("plain") or r["text"]
+                call = self._find_call(s, r["call_id"]) if r.get("call_id") else None
+                if call is not None and call.outcome:
+                    line += f" \u2014 {call.outcome}"
+                lines.append(self.redactor.redact(line))
+            result = self.redactor.redact(final) if isinstance(final, str) else ""
+            if aid != MAIN and not lines and not result:
+                return
+            sink(SummaryRequest(s.id, aid, t0, now, self.redactor.redact(prompt or ""), lines, result))
+        except Exception:
+            log.debug("summary request failed", exc_info=True)
 
     def _plain(self, text: str, limit: int) -> str:
         """Redact first, then clip, so a cut can never expose part of a secret."""
@@ -966,11 +1045,13 @@ class Store:
         agent.transcript_path = _str(e.get("agent_transcript_path")) or agent.transcript_path
         self._act(s, now, aid, "agent", f"{agent.label} finished", "ok",
                   plain=describe.plain_helper(self._helper_name(agent), "finished"))
+        self._request_summary(s, aid, now, agent.result)
 
     def _h_stop(self, s: Session, e: dict, aid: str, now: float) -> None:
         s.agents[MAIN].status = "idle"
         self._close_unreported(s, s.agents[MAIN], now)
         self._act(s, now, MAIN, "turn", "Turn finished", "ok", plain=describe.TURN_FINISHED)
+        self._request_summary(s, MAIN, now, e.get("last_assistant_message"))
 
     def _h_stop_failure(self, s: Session, e: dict, aid: str, now: float) -> None:
         s.agents[MAIN].status = "error"
@@ -981,6 +1062,7 @@ class Store:
             if v:
                 parts.append(self.redactor.text(v if isinstance(v, str) else _dumps(v)))
         self._act(s, now, MAIN, "error", "Turn failed: " + " - ".join(parts) if parts else "Turn failed", "error")
+        self._request_summary(s, MAIN, now, e.get("last_assistant_message"))
 
     def _h_notification(self, s: Session, e: dict, aid: str, now: float) -> None:
         msg = e.get("message")

@@ -18,6 +18,7 @@ from . import APP_ID, __version__
 from .config import Config
 from .relay import RELAY_MAX, Relay, machine_id, os_user  # noqa: F401
 from .state import Store
+from .summarize import Summarizer, SummaryRequest
 from .transcript import TranscriptWatcher
 
 log = logging.getLogger(__name__)
@@ -108,6 +109,7 @@ def create_app(
     start_loops: bool = True,
     relay_maxsize: int = RELAY_MAX,
     relay_options: dict | None = None,
+    summary_options: dict | None = None,
 ) -> FastAPI:
     store = store or Store(config, clock=clock)
     relay = (
@@ -119,6 +121,20 @@ def create_app(
     if relay is not None and watcher.emit is None:
         watcher.emit = relay.emit
 
+    summarizer = Summarizer.from_config(config, store.redactor, clock=clock, **(summary_options or {}))
+    if summarizer is not None:
+        store.summary_sink = summarizer.submit
+
+        def deliver(req: SummaryRequest, text: str, model: str) -> None:
+            body = store.add_summary(req.session_id, req.agent_id, req.t_start, req.t_end, text, model)
+            if body is not None and relay is not None:  # relay exactly what the row shows
+                relay.emit("summary", req.session_id, {
+                    "agent_id": req.agent_id, "t_start": req.t_start, "t_end": req.t_end,
+                    "text": body, "model": model,
+                })
+
+        summarizer.deliver = deliver
+
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         tasks: list[asyncio.Task] = []
@@ -128,6 +144,8 @@ def create_app(
             if app.state.relay is not None:
                 tasks.append(asyncio.create_task(_relay_forever(app.state.relay.run_writer)))
                 tasks.append(asyncio.create_task(_relay_forever(app.state.relay.run_sender)))
+            if app.state.summarizer is not None:
+                tasks.append(asyncio.create_task(_relay_forever(app.state.summarizer.run)))
         try:
             yield
         finally:
@@ -154,6 +172,7 @@ def create_app(
     state.watcher = watcher
     state.clients = {}  # WebSocket -> Client
     state.relay = relay
+    state.summarizer = summarizer
     state.request_shutdown = lambda: None
     state.on_shutdown = []
     state.idle_since = clock()
@@ -260,6 +279,8 @@ def create_app(
         }
         if state.relay is not None:
             out["relay"] = state.relay.stats()
+        if state.summarizer is not None:
+            out["summaries"] = state.summarizer.stats()
         return out
 
     async def read_capped(request: Request) -> Optional[bytes]:

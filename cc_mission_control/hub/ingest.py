@@ -9,7 +9,7 @@ from typing import Any, Optional
 from ..redact import Redactor
 from ..state import MAIN, _norm_agent
 
-KINDS = frozenset({"hook", "ctx", "usage", "meta", "title", "cwd"})
+KINDS = frozenset({"hook", "ctx", "usage", "meta", "title", "cwd", "summary"})
 EID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 # machine_id and session_id end up in URLs and file-like keys: a plain, short token (never "." or "..").
 ID_RE = re.compile(r"[A-Za-z0-9._:@-]{1,128}")
@@ -80,6 +80,18 @@ def usage_row(rec: Record) -> Optional[tuple]:
     return (agent_id, message_id, model, *(d[k] for k in USAGE_FIELDS))
 
 
+def summary_ok(d: dict) -> bool:
+    """Shape of a `summary` record's data: non-empty text, bounded strings, finite times."""
+    text, agent, model = d.get("text"), d.get("agent_id"), d.get("model")
+    if not (isinstance(text, str) and 0 < len(text.strip()) <= 4000):
+        return False
+    if not (isinstance(agent, str) and 0 < len(agent) <= ID_MAX):
+        return False
+    if model is not None and not (isinstance(model, str) and len(model) <= LABEL_MAX):
+        return False
+    return _time(d.get("t_start")) and _time(d.get("t_end"))
+
+
 def parse_envelope(item: Any, redactor: Redactor) -> Optional[Record]:
     """A validated, re-redacted Record, or None if the envelope is malformed."""
     if not isinstance(item, dict):
@@ -104,5 +116,7 @@ def parse_envelope(item: Any, redactor: Redactor) -> Optional[Record]:
         data=redactor.value(data),
     )
     if kind == "usage" and usage_row(rec) is None:
+        return None
+    if kind == "summary" and not summary_ok(rec.data):
         return None
     return rec

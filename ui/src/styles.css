@@ -1010,6 +1010,22 @@ button.feed-agent:hover {
 .feed-empty {
   padding: 12px;
 }
+/* AI summary block (SPEC 11.6.2): tinted, with an accent edge, in both Plain and Technical */
+.feed-item.feed-summary {
+  background: var(--panel-2);
+  border-left-color: var(--accent);
+  border-top: 1px solid var(--line-strong);
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.feed-summary-label {
+  color: var(--accent);
+  max-width: none;
+  white-space: normal;
+}
+.feed-summary-text {
+  color: var(--ink);
+}
 .new-pill {
   position: absolute;
   top: 40px;
