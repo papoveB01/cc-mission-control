@@ -1,0 +1,131 @@
+"""CCMC_* settings (SPEC section 12), read once from the environment."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Mapping
+
+
+def _int(env: Mapping[str, str], name: str, default: int) -> int:
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _default_data_dir(env: Mapping[str, str]) -> Path:
+    plugin_data = env.get("CLAUDE_PLUGIN_DATA", "").strip()
+    if plugin_data:
+        return Path(plugin_data)
+    return Path.home() / ".cc-mission-control"
+
+
+@dataclass(frozen=True)
+class Config:
+    port: int = 4317
+    data_dir: Path = field(default_factory=lambda: Path.home() / ".cc-mission-control")
+    context_window: int = 200_000
+    idle_minutes: int = 30
+    stale_minutes: int = 60
+    max_calls: int = 500
+    max_field_chars: int = 4000
+    redact_file: Path | None = None
+    no_browser: bool = False
+    upstream_url: str | None = None
+    upstream_token: str | None = None
+    spool_mb: int = 200
+    dev_origins: tuple[str, ...] = ()
+    summaries: bool = False  # CCMC_SUMMARIES=1 (SPEC 11.6.2); the key itself is never kept in Config
+    summary_key_file: Path | None = None  # None = <data_dir>/summary_api_key
+    summary_model: str = "claude-haiku-5-5"
+    summary_max_per_hour: int = 30
+    pricing_file: Path | None = None  # CCMC_PRICING_FILE (SPEC 13.6); None = built-in price table
+    nudge: bool = True  # CCMC_NUDGE=0 turns the drift nudge off (SPEC 11.12)
+    convention_rubric: Path | None = None  # CCMC_CONVENTION_RUBRIC (SPEC 11.14); None = built-in rubric
+    sysmon: bool = True  # CCMC_SYSMON=0 turns host sampling off (SPEC 11.16)
+    plan_detect: bool = True  # CCMC_PLAN_DETECT=0 stops reading the plan type from .claude.json (SPEC 13.6)
+    claude_config_dir: Path | None = None  # CLAUDE_CONFIG_DIR, used by the plan lookup only
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "Config":
+        env = os.environ if env is None else env
+        data_dir = env.get("CCMC_DATA_DIR", "").strip()
+        redact_file = env.get("CCMC_REDACT_FILE", "").strip()
+        dev_origins = env.get("CCMC_DEV_ORIGINS", "")
+        key_file = env.get("CCMC_SUMMARY_KEY_FILE", "").strip()
+        pricing_file = env.get("CCMC_PRICING_FILE", "").strip()
+        rubric = env.get("CCMC_CONVENTION_RUBRIC", "").strip()
+        cfg_dir = env.get("CLAUDE_CONFIG_DIR", "").strip()
+        return cls(
+            port=_int(env, "CCMC_PORT", 4317),
+            data_dir=Path(data_dir).expanduser() if data_dir else _default_data_dir(env),
+            context_window=_int(env, "CCMC_CONTEXT_WINDOW", 200_000),
+            idle_minutes=_int(env, "CCMC_IDLE_MINUTES", 30),
+            stale_minutes=_int(env, "CCMC_STALE_MINUTES", 60),
+            max_calls=_int(env, "CCMC_MAX_CALLS", 500),
+            max_field_chars=_int(env, "CCMC_MAX_FIELD_CHARS", 4000),
+            redact_file=Path(redact_file).expanduser() if redact_file else None,
+            no_browser=env.get("CCMC_NO_BROWSER", "").strip() == "1",
+            upstream_url=env.get("CCMC_UPSTREAM_URL", "").strip() or None,
+            upstream_token=env.get("CCMC_UPSTREAM_TOKEN", "").strip() or None,
+            spool_mb=_int(env, "CCMC_SPOOL_MB", 200),
+            dev_origins=tuple(o.strip().rstrip("/") for o in dev_origins.split(",") if o.strip()),
+            summaries=env.get("CCMC_SUMMARIES", "").strip() == "1",
+            summary_key_file=Path(key_file).expanduser() if key_file else None,
+            summary_model=env.get("CCMC_SUMMARY_MODEL", "").strip() or "claude-haiku-5-5",
+            summary_max_per_hour=max(0, _int(env, "CCMC_SUMMARY_MAX_PER_HOUR", 30)),
+            pricing_file=Path(pricing_file).expanduser() if pricing_file else None,
+            nudge=env.get("CCMC_NUDGE", "").strip() != "0",
+            convention_rubric=Path(rubric).expanduser() if rubric else None,
+            sysmon=env.get("CCMC_SYSMON", "").strip() != "0",
+            plan_detect=env.get("CCMC_PLAN_DETECT", "").strip() != "0",
+            claude_config_dir=Path(cfg_dir).expanduser() if cfg_dir else None,
+        )
+
+
+MIN_HUB_TOKEN = 32
+
+
+@dataclass(frozen=True)
+class HubConfig:
+    """CCMC_HUB_* settings (SPEC 13.5), read by the hub process only."""
+
+    token: str | None = field(default=None, repr=False)
+    db: Path = Path("/data/history.db")
+    port: int = 4318
+    bind: str = "0.0.0.0"
+    hosts: tuple[str, ...] = ("ccmc-hub",)
+    tailnet_hosts: bool = False  # also accept ccmc-hub.<tailnet>.ts.net (only when CCMC_HUB_HOSTS is unset)
+    retention_days: int = 0
+    backups: int = 7
+    pricing_file: Path | None = None  # CCMC_PRICING_FILE (SPEC 13.6)
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "HubConfig":
+        env = os.environ if env is None else env
+        hosts = tuple(h.strip().lower() for h in env.get("CCMC_HUB_HOSTS", "").split(",") if h.strip())
+        pricing_file = env.get("CCMC_PRICING_FILE", "").strip()
+        return cls(
+            token=env.get("CCMC_HUB_TOKEN", "").strip() or None,
+            db=Path(env.get("CCMC_HUB_DB", "").strip() or "/data/history.db").expanduser(),
+            port=_int(env, "CCMC_HUB_PORT", 4318),
+            bind=env.get("CCMC_HUB_BIND", "").strip() or "0.0.0.0",
+            hosts=hosts or ("ccmc-hub",),
+            tailnet_hosts=not hosts,
+            retention_days=max(0, _int(env, "CCMC_HUB_RETENTION_DAYS", 0)),
+            backups=max(0, _int(env, "CCMC_HUB_BACKUPS", 7)),
+            pricing_file=Path(pricing_file).expanduser() if pricing_file else None,
+        )
+
+    def problem(self) -> str | None:
+        """Why the hub must not start with this config, or None."""
+        if not self.token:
+            return "CCMC_HUB_TOKEN is not set; the hub refuses to start without a token"
+        if len(self.token) < MIN_HUB_TOKEN:
+            return f"CCMC_HUB_TOKEN must be at least {MIN_HUB_TOKEN} characters"
+        return None

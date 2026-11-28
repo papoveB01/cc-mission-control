@@ -1,0 +1,387 @@
+{
+ "version": 1,
+ "rules": [
+  {
+   "id": "overview",
+   "title": "What the project is",
+   "area": "Orientation",
+   "weight": 2,
+   "why": "An agent that starts cold needs to know what the project is and how it is laid out before it changes anything.",
+   "signals": [
+    [
+     "\\b(this|the) (project|repo|repository|app|application|service|library|plugin|tool|package|codebase|monorepo|site|framework|cli)\\b.{0,60}\\b(is|does|provides|implements|lets|shows|helps|contains)\\b",
+     "\\b(a|an) [\\w -]{0,40}\\b(plugin|library|service|application|framework|cli|api|dashboard|server|tool)\\b.{0,40}\\b(that|which)\\b"
+    ],
+    [
+     "\\b(architecture|project structure|directory (layout|structure)|repo(sitory)? (layout|structure)|folder (layout|structure)|data flow|event flow|code ?map)\\b",
+     "\\b(main|key|core) (modules?|packages?|directories|components|services)\\b"
+    ]
+   ],
+   "suggestion": "## Overview\n- This project is <one sentence: what it does and who uses it>.\n- Architecture: <main components and how data flows between them>.\n- Project structure: <top-level folders and what each one holds>.\n- Entry points: <where execution starts>."
+  },
+  {
+   "id": "commands",
+   "title": "Build and test commands",
+   "area": "Orientation",
+   "weight": 2,
+   "why": "Agents run commands to check their own work, so the exact commands must be written down.",
+   "signals": [
+    [
+     "\\b(pytest|npm (run )?test|yarn test|pnpm (run )?test|go test|cargo test|cargo nextest|mvn (-\\w+ )*test|gradlew? test|flutter test|rspec|phpunit|dotnet test|make test|tox|vitest|jest|ctest|bun test|deno test|mix test|swift test)\\b",
+     "\\b(test|tests|testing) (command|script|runner)s?\\b",
+     "\\b(run|running) (the )?(unit |integration |full )?tests?( suite)? (with|using|via)\\b"
+    ],
+    [
+     "\\b(npm (run )?(build|lint|dev|start|format)|yarn (run )?(build|lint|dev|start)|pnpm (run )?(build|lint|dev|start)|make (build|lint|run|all|check|dev|install)|cargo (build|run|clippy|check)|go (build|run|vet)|mvn (-\\w+ )*(package|compile|install)|gradlew? (build|assemble|run)|ruff|eslint|flake8|mypy|black|prettier|uv (run|build|sync)|docker (compose|build)|flutter (build|run|analyze)|tsc|bundle exec)\\b",
+     "\\b(build|lint|run|start|dev|format|install|compile) (command|script)s?\\b"
+    ]
+   ],
+   "suggestion": "## Commands\n- Install: `<install command>`\n- Test: `<test command>` (one file: `<single test command>`)\n- Build: `<build command>`\n- Lint: `<lint command>`\n- Run locally: `<run command>`"
+  },
+  {
+   "id": "roles",
+   "title": "Roles and who decides",
+   "area": "Coordination",
+   "weight": 2,
+   "why": "Multi-agent work needs a named coordinator, named worker roles, and a clear owner for decisions.",
+   "signals": [
+    [
+     "\\b(coordinators?|orchestrators?|orchestrat(es|ing)|hub[- ]and[- ]spoke|lead agent|team lead|main agent|main session|conductor|planner agent)\\b",
+     "\\bhub (session|agent|role)\\b",
+     "\\bthe hub (coordinates|plans|decides|dispatches|delegates|reviews|briefs)\\b"
+    ],
+    [
+     "\\b(spokes?|subagents?|sub-agents?|implementers?|worker agents?|coder agents?|reviewer agents?|specialist agents?)\\b",
+     "\\b(workers?|helpers?) (agents?|roles?)\\b"
+    ],
+    [
+     "\\b(ask(s|ing)? (the )?(user|human|owner|maintainer)|(user|human|owner|maintainer) (approves?|decides?|signs off|confirms?|must approve|has the final))\\b",
+     "\\bapprov\\w*\\b.{0,40}\\b(user|human|owner|maintainer)\\b",
+     "\\bescalat\\w+ to (the )?(user|human|owner)\\b"
+    ]
+   ],
+   "suggestion": "## Roles\n- Coordinator: <the role that plans, writes briefs and integrates; it does not write code>.\n- Workers: <subagent roles, for example implementer and reviewer>; each gets a self-contained brief.\n- Decisions: the user approves <list of decisions>; the coordinator asks the user before <events>."
+  },
+  {
+   "id": "model_tiers",
+   "title": "Model per role",
+   "area": "Coordination",
+   "weight": 1,
+   "why": "Naming which model does which work, and setting it explicitly, keeps cost and quality predictable.",
+   "signals": [
+    [
+     "\\b(opus|sonnet|haiku|gpt-?\\d\\S*|gemini|fable|model tiers?|(strongest|larger|largest|smaller|cheaper|cheapest|fastest|fast|mid-?tier|top-?tier|frontier) model)\\b",
+     "\\bmodel\\b.{0,30}\\b(per|for each|by) (role|task|agent|kind of work)\\b"
+    ],
+    [
+     "\\b(set|pass|specify|specified|pin|pinned|choose|chosen|select|declare)\\w*\\b.{0,40}\\bmodel\\b",
+     "\\bmodel\\s*[:=]\\s*\\S",
+     "\\bexplicit(ly)?\\b.{0,30}\\bmodel\\b|\\bmodel\\b.{0,30}\\bexplicit(ly)?\\b",
+     "\\bnever (rely on|inherit|use) (the )?default model\\b"
+    ]
+   ],
+   "suggestion": "## Models\n- <strongest model> for coordination, planning and final review.\n- <mid-tier model> for implementation and independent review.\n- <fast model> for lookups and mechanical edits.\n- Set the model explicitly for every subagent; never rely on the default model."
+  },
+  {
+   "id": "isolation",
+   "title": "Isolated workspaces",
+   "area": "Coordination",
+   "weight": 2,
+   "why": "Parallel agents that share one checkout overwrite each other's work.",
+   "signals": [
+    [
+     "\\bworktrees?\\b",
+     "\\bone (git )?branch per\\b",
+     "\\b(separate|own|dedicated|isolated|feature|per-agent|task) (git )?branch(es)?\\b",
+     "\\bisolat(ed|ion)\\b.{0,30}\\b(workspace|copy|checkout|branch|clone|directory)\\b",
+     "\\b(own|separate|private) (clone|checkout|workspace|working (tree|copy))\\b"
+    ],
+    [
+     "\\b(never|no|don't|do not|avoid|forbidden|must not|not allowed)\\b.{0,50}\\b(git )?stash\\b",
+     "\\b(never|no|don't|do not|avoid|must not|not allowed)\\b.{0,40}\\b(switch\\w*|checkout|chang\\w+|swap\\w*)\\b.{0,15}\\bbranch(es)?\\b",
+     "\\bbranch switch\\w*\\b",
+     "\\bshared (checkout|working (tree|copy)|clone|workspace)\\b"
+    ]
+   ],
+   "suggestion": "## Isolated workspaces\n- Every agent that writes code works in its own git worktree on its own branch: <worktree and branch naming>.\n- In a shared checkout, never run git stash and never switch branches.\n- Agents leave changes uncommitted unless told to commit; the coordinator merges.\n- Remove the worktree after the merge."
+  },
+  {
+   "id": "risk_tiers",
+   "title": "Risk tiers",
+   "area": "Risk and review",
+   "weight": 1,
+   "why": "Not every change needs the same scrutiny; named tiers say how much each one gets.",
+   "signals": [
+    [
+     "\\brisk[- ](tiers?|levels?|classes|class|classification|rating|categories)\\b",
+     "\\b(tier|level)[ -]?[0-4]\\b",
+     "\\b(low|medium|high|critical)[- ]risk\\b",
+     "\\btiers?\\b.{0,40}\\b(low|medium|high|critical|normal)\\b"
+    ],
+    [
+     "\\b(paths?|files?|folders?|blast radius|impact|scope)\\b.{0,60}\\b(tiers?|risk|escalat\\w+)\\b",
+     "\\b(tiers?|risk)\\b.{0,60}\\b(determined|decided|set|assigned|chosen|picked)\\b.{0,20}\\bby\\b",
+     "\\bescalat\\w+\\b",
+     "\\bblast radius\\b"
+    ]
+   ],
+   "suggestion": "## Risk tiers\n- Tier 0 (<low risk, such as docs and comments>): <lightweight path>.\n- Tier 1 (<normal changes>): <review required>.\n- Tier 2 (<high risk, such as auth, data migrations, deploy configuration>): <extra gates and user approval>.\n- A change's tier is set by the paths it touches and its blast radius; when unsure, escalate to the higher tier."
+  },
+  {
+   "id": "review",
+   "title": "Independent review",
+   "area": "Risk and review",
+   "weight": 2,
+   "why": "A change checked only by its author carries the author's blind spots.",
+   "signals": [
+    [
+     "\\b(reviews?|reviewed|reviewer|reviewers|reviewing)\\b"
+    ],
+    [
+     "\\b(independent|different|separate|fresh|second|blind|adversarial|another|unbiased|cold|third-party)\\b.{0,40}\\b(review\\w*|agent|model|context|session|eyes)\\b",
+     "\\b(never|not|don't|do not)\\b.{0,20}\\b(review|approve|grade|check)\\w*\\b.{0,15}\\b(its|their|your|own|itself)\\b",
+     "\\breview\\w*\\b.{0,30}\\bby (a |an )?(different|separate|independent|another|fresh)\\b",
+     "\\bblind review\\b"
+    ]
+   ],
+   "suggestion": "## Independent review\n- Every change gets a review before merge, run by a separate agent with fresh context; the author never reviews its own work.\n- The reviewer gets the diff and the spec, not the author's reasoning (blind review).\n- Reviewer output: findings with a severity, file and line, and a verdict of <approve or changes requested>."
+  },
+  {
+   "id": "test_gates",
+   "title": "Tests that prove the fix",
+   "area": "Risk and review",
+   "weight": 2,
+   "why": "A test that cannot fail proves nothing, so tests must be shown to fail without the fix.",
+   "signals": [
+    [
+     "\\b(regression tests?|failing tests?|(quality|test|release|merge|ci) gates?)\\b",
+     "\\b(add|write|include|ship|require)s? (a |an |the )?(new )?(regression |unit |integration )?tests?\\b",
+     "\\btests? (must|should|need to|have to)\\b"
+    ],
+    [
+     "\\b(fail|fails|failing|red)\\b.{0,60}\\b(revert\\w*|without the fix|before the fix|fix is (removed|reverted|absent|missing)|fix (removed|reverted))\\b",
+     "\\brevert\\w*\\b.{0,60}\\b(fail\\w*|red)\\b",
+     "\\bmutation (test\\w*|check\\w*|analysis)\\b",
+     "\\bfalsifiab\\w+\\b",
+     "\\bfailing[- ]first\\b|\\bfail(s|ing)? first\\b|\\bred[- ]green\\b"
+    ]
+   ],
+   "suggestion": "## Tests that prove the fix\n- Every bug fix and feature ships with tests that must pass before merge (the test gate).\n- A regression test must fail when the fix is reverted; verify it by reverting the fix and running the test.\n- Tests must be falsifiable: <how to check that they can fail, for example a mutation check>.\n- A bug fix without a failing-first test is not done."
+  },
+  {
+   "id": "severity",
+   "title": "Defect severity scale",
+   "area": "Risk and review",
+   "weight": 1,
+   "why": "A shared scale makes review findings comparable and says which ones stop a merge.",
+   "signals": [
+    [
+     "\\bseverit(y|ies)\\b",
+     "\\b(P[0-4]|T[1-4]|S[1-4]|SEV-?[0-4])\\b.{0,40}\\b(P[0-4]|T[1-4]|S[1-4]|SEV-?[0-4])\\b",
+     "\\bcritical\\b.{0,30}\\bhigh\\b",
+     "\\bblockers?\\b"
+    ],
+    [
+     "\\b(block\\w*|must be fixed|must fix|before (merge|release|ship\\w*))\\b.{0,60}\\b(severity|critical|high|blocker|[PST][0-4]|sev-?[0-4])\\b",
+     "\\b(critical|high|blockers?|[PST][0-4]|sev-?[0-4])\\b.{0,60}\\b(block\\w*|must be fixed|before (merge|release|ship\\w*))\\b"
+    ]
+   ],
+   "suggestion": "## Defect severity\n- Severity scale: S1 (critical: data loss, security, outage), S2 (high: a feature is broken), S3 (medium: degraded behavior), S4 (low: cosmetic).\n- S1 and S2 findings block the merge and must be fixed before release; S3 and S4 may be recorded as follow-ups.\n- Record each finding with its level, file and line in <where findings are tracked>."
+  },
+  {
+   "id": "patch_rounds",
+   "title": "Fix rounds and re-review",
+   "area": "Risk and review",
+   "weight": 1,
+   "why": "Fixes can introduce new defects, and unbounded rounds never converge.",
+   "signals": [
+    [
+     "\\bre-?review\\w*",
+     "\\breview(ed)? again\\b",
+     "\\b(second|another|follow-?up) (review|pass|round)\\b",
+     "\\bfix(es)? (are|is|get|gets|must be) (re-?)?reviewed\\b",
+     "\\bverify (that )?(the )?fix(es)?\\b"
+    ],
+    [
+     "\\b(rounds?|iterations?|passes|cycles)\\b.{0,40}\\b(limit\\w*|max\\w*|at most|cap\\w*|no more than|up to)\\b",
+     "\\b(limit\\w*|max\\w*|at most|cap\\w*|no more than|up to)\\b.{0,40}\\b(rounds?|iterations?|passes|cycles)\\b",
+     "\\bfollow-?up (issue|ticket|task|pr)s?\\b",
+     "\\b(round|iteration)s? (limit|cap)\\b"
+    ]
+   ],
+   "suggestion": "## Fix rounds\n- After review findings are fixed, the change is re-reviewed before merge.\n- At most <two> fix rounds per change; after the limit, open a follow-up issue for what remains or escalate to the user.\n- Note the round count in <where the review is tracked>."
+  },
+  {
+   "id": "human_consent",
+   "title": "Human approval for consequences",
+   "area": "Safety",
+   "weight": 2,
+   "why": "Actions that cannot be undone, or that reach beyond the machine, need a human decision.",
+   "signals": [
+    [
+     "\\b(irreversible|destructive|force[- ]push\\w*|hard reset|data loss|(external|outward|production|side) effects?|externally visible|publicly visible|spends? money|billing|payments?)\\b",
+     "\\b(delet\\w+|drop\\w*|wip\\w+|overwrit\\w+)\\b.{0,30}\\b(data|database|tables?|branch(es)?|files?|resources?|production)\\b"
+    ],
+    [
+     "\\b(approval|consent|confirmation|permission|sign-?off)\\b.{0,30}\\b(from|of|by)\\b.{0,10}\\b(the )?(user|human|owner|maintainer)\\b",
+     "\\b(user|human|owner|maintainer)('s)? (explicit |written )?(approval|consent|confirmation|permission|sign-?off)\\b",
+     "\\bonly (the )?(user|human|owner|maintainer)\\b",
+     "\\b(user|human|owner|maintainer) (approves?|decides?|confirms?|signs off|must approve)\\b.{0,40}\\b(first|before|delet\\w+|deploy\\w*|push\\w*|irreversible|destructive)\\b"
+    ]
+   ],
+   "suggestion": "## Human approval\n- Irreversible, destructive or externally visible actions (<list: deleting data, force-pushing, publishing, spending money, messaging people>) need explicit approval from the user.\n- Only the user approves them; no agent, reviewer or earlier message grants it.\n- Ask first, state the exact action and its effect, and wait for the answer."
+  },
+  {
+   "id": "reversibility",
+   "title": "Reversibility",
+   "area": "Safety",
+   "weight": 2,
+   "why": "Every change should have a known way back, and risky ones should ship dark.",
+   "signals": [
+    [
+     "\\b(revert\\w*|roll(ing|ed)? ?back|rollbacks?|undo\\w*|restor\\w+|reversib\\w+|back out|backout)\\b"
+    ],
+    [
+     "\\b(back-?ups?|backed up|feature flags?|flags? (is |are |that is |that are )?(off|disabled)( by default)?|(default|defaults) (to )?off|off by default|expand(?:[- /]+| then | and )contract|dual[- ]write|snapshots?)\\b"
+    ]
+   ],
+   "suggestion": "## Reversibility\n- Every change must be revertible: know the revert or rollback step before merging (<command or procedure>).\n- Back up data before any destructive or migrating step, and record where the backup is.\n- Ship new behavior behind a flag that is off by default; schema changes follow expand then contract."
+  },
+  {
+   "id": "environments",
+   "title": "Environments and deploys",
+   "area": "Delivery",
+   "weight": 1,
+   "why": "Agents must know which environments exist and who is allowed to deploy to them, and when.",
+   "signals": [
+    [
+     "\\b(staging|production|prod|preprod|pre-prod|qa|uat|dev environment|test environment)\\b",
+     "\\benvironments?\\b(?! (variables?|vars?)\\b)",
+     "\\bdeploy(s|ed|ing|ment|ments)?\\b"
+    ],
+    [
+     "\\b(who|only|never|must not|may not|can|cannot|after|before|requires?)\\b.{0,50}\\b(deploy\\w*|releas\\w+|ship(s|ped|ping)?|promot\\w+)\\b",
+     "\\b(deploy\\w*|releas\\w+|promot\\w+)\\b.{0,50}\\b(only|approval|approved|window|manually|freeze|never|by (the )?(user|maintainer|owner|ci|pipeline|release manager))\\b"
+    ]
+   ],
+   "suggestion": "## Environments and deploys\n- Environments: <local, staging, production> and how they differ.\n- Only <the user or the CI pipeline> deploys to production; agents never deploy it.\n- Deploy to staging first and verify before promoting; no production deploys <during freeze windows>."
+  },
+  {
+   "id": "secrets",
+   "title": "Secrets",
+   "area": "Safety",
+   "weight": 2,
+   "why": "Agents read and write many files and logs; a written handling rule keeps secrets out of them.",
+   "signals": [
+    [
+     "\\b(secrets?|tokens?|api[- _]?keys?|credentials?|passwords?|private keys?|ssh keys?)\\b",
+     "(^|\\s)\\.env\\b"
+    ],
+    [
+     "\\b(never|don't|do not|must not)\\b.{0,50}\\b(print\\w*|log\\w*|commit\\w*|echo\\w*|paste\\w*|expos\\w+|share|leak\\w*|cat)\\b.{0,50}\\b(secrets?|tokens?|api[- _]?keys?|credentials?|passwords?|private keys?|ssh keys?)\\b",
+     "\\b(secrets?|tokens?|api[- _]?keys?|credentials?|passwords?|private keys?|ssh keys?)\\b.{0,60}\\b(never|must not|don't|do not|not)\\b.{0,40}\\b(print\\w*|log\\w*|commit\\w*|echo\\w*|paste\\w*|expos\\w+|shared?|leak\\w*)\\b",
+     "\\bgit-?ignored?\\b",
+     "\\.gitignore\\b",
+     "\\b(chmod 0?600|mode 0?600|0600)\\b",
+     "\\b(secret|secrets) (store|manager)\\b|\\bvault\\b|\\bkeychain\\b"
+    ]
+   ],
+   "suggestion": "## Secrets\n- Never print, log, paste or commit secrets, tokens, API keys or credentials.\n- Keep them in <secret store or ignored file>, listed in .gitignore, with file mode 0600.\n- Use placeholders in examples and tests, and build fake credentials at runtime.\n- If a secret leaks, <rotate it and tell the user>."
+  },
+  {
+   "id": "privacy",
+   "title": "Personal data",
+   "area": "Safety",
+   "weight": 1,
+   "why": "Personal data copied into logs, prompts or fixtures is hard to remove again.",
+   "signals": [
+    [
+     "\\b(personal (data|information|details)|pii|customer data|user data|private data|gdpr|ccpa|personally identifiable|end[- ]user data|sensitive data|patient data)\\b"
+    ],
+    [
+     "\\b(never|don't|do not|must not|avoid|not)\\b.{0,60}\\b(personal|pii|customer|user data|private data|sensitive data)\\b",
+     "\\b(personal|pii|customer|user data|private data|sensitive data)\\b.{0,80}\\b(never|not (in|into|to)|anonymi[sz]\\w*|pseudonymi[sz]\\w*|consent|redact\\w*|mask\\w*|retention|opt[- ]in|synthetic)\\b"
+    ]
+   ],
+   "suggestion": "## Personal data\n- Personal and customer data (<names, emails, ids, addresses>) never goes into logs, prompts, tests or commits.\n- Use anonymized or synthetic data in fixtures and examples.\n- Collect or process personal data only with <consent or legal basis>, and delete it under <retention rule>."
+  },
+  {
+   "id": "process_safety",
+   "title": "Shared machine safety",
+   "area": "Safety",
+   "weight": 1,
+   "why": "Agents share a machine with the user's other work; a careless kill or a heavy job can hurt it.",
+   "signals": [
+    [
+     "\\b(never|don't|do not|must not|avoid|no)\\b.{0,30}\\b(kill\\w*|pkill|killall)\\b",
+     "\\bkill\\w*\\b.{0,40}\\b(pid|pids|process id)\\b",
+     "\\brecord(ed|s)? (the )?pids?\\b",
+     "\\bpids?\\b.{0,40}\\b(record\\w*|saved?|stored?|launch\\w*|start\\w*)\\b",
+     "\\b(lock ?files?|flock|mutex|semaphores?|concurrency limits?|one at a time|resource limits?|ulimit)\\b",
+     "\\bheavy (jobs?|builds?|tasks?|processes)\\b",
+     "\\bshared (machine|host|server|box)\\b"
+    ]
+   ],
+   "suggestion": "## Shared machine safety\n- Never kill processes by name (no pkill or killall); record the pid at launch and kill only that pid.\n- Use a lock or a concurrency limit for heavy jobs such as <builds, test suites, model runs>, so parallel agents do not starve the machine.\n- Run local servers on a non-default port, and clean up what you start."
+  },
+  {
+   "id": "reporting",
+   "title": "Faithful reporting",
+   "area": "Communication",
+   "weight": 1,
+   "why": "A report is only useful if it separates what was verified from what was assumed or skipped.",
+   "signals": [
+    [
+     "\\b(report(s|ing)?|summari[sz]\\w*|hand-?off|status update)\\b.{0,60}\\b(to the user|to the human|to the coordinator|back to|the user|results?|findings?|what (was|you|changed))\\b",
+     "\\b(final|status|progress) (report|update|summary)\\b",
+     "\\bwhen (you )?(finish|are done|done|complete\\w*)\\b.{0,40}\\b(report|tell|say|summari[sz]\\w*)\\b"
+    ],
+    [
+     "\\b(skipped|flaky|not (run|verified|tested|checked)|unverified|inferred|measured|assum\\w+|didn't run|did not run|could not (run|verify))\\b.{0,60}\\b(say|state|report|mention|distinguish|flag|label|note|disclose|call out)\\b",
+     "\\b(say|state|report|mention|distinguish|flag|label|note|disclose|call out|be explicit|be clear)\\b.{0,60}\\b(skipped|flaky|unverified|inferred|measured|not (run|verified|tested|checked)|assum\\w+|didn't run|did not run)\\b"
+    ]
+   ],
+   "suggestion": "## Reporting\n- Report to the user plainly: what changed, what was verified, and what is still open (<report format>).\n- State what you skipped, what was flaky, and what you did not run.\n- Say which results were measured and which were inferred; never present a guess as a fact."
+  },
+  {
+   "id": "git_flow",
+   "title": "Commits and merges",
+   "area": "Delivery",
+   "weight": 1,
+   "why": "Agents commit and merge constantly, so the message style and the merge path need to be fixed.",
+   "signals": [
+    [
+     "\\b(commit (messages?|style|format|subject|prefix|body)|conventional commits?|imperative (mood|subject)|co-authored-by|signed-off-by)\\b",
+     "^\\s*(?:[-*]\\s+)?`?(feat|fix|chore|docs|refactor|test)(\\([\\w-]+\\))?:"
+    ],
+    [
+     "\\b(pull requests?|prs?|merge (requests?|commits?|strategy|rules?|queue)|squash\\w*|rebas\\w+|fast-forward|branch (naming|names?|protection|policy)|(feature|topic|release) branch(es)?|(main|master|trunk) branch|trunk-based|force[- ]push\\w*)\\b"
+    ]
+   ],
+   "suggestion": "## Commits and merges\n- Commit messages: <style, for example an imperative subject under 72 characters, with the body saying why>.\n- One logical change per commit; do not commit generated files or secrets.\n- Work on a branch named <pattern> and open a pull request; merge by <squash or merge commit> after review and green checks.\n- Never force-push to <protected branches>."
+  },
+  {
+   "id": "enforcement",
+   "title": "What is enforced",
+   "area": "Delivery",
+   "weight": 1,
+   "why": "A rule that only lives in prose depends on the agent following it; say which ones are checked by machine.",
+   "signals": [
+    [
+     "\\b(enforced|enforces?|enforcement|enforcing)\\b",
+     "\\b(ci|continuous integration) (fails?|blocks?|runs?|checks?|pipeline|gates?)\\b",
+     "\\b(required|status) (checks?|reviews?)\\b",
+     "\\b(branch protections?|protected branch(es)?|pre-?commit( hooks?)?|git hooks?|github actions|ci pipeline|permission deny)\\b",
+     "\\bhooks? (block|reject|enforce|deny|run)\\w*\\b"
+    ],
+    [
+     "\\b(not enforced|unenforced|by convention|honou?r system|advisory)\\b",
+     "\\b(rely|relies|relying|depends?|trust\\w*)\\b.{0,40}\\b(agent|convention|discipline|follow\\w*)\\b",
+     "\\b(agents?|agent's|you) (must|should) follow\\b|\\bfollowed by (the )?agents?\\b",
+     "\\bmanual(ly)? (check|review|enforced|verified)\\b"
+    ]
+   ],
+   "suggestion": "## What is enforced\n- Enforced mechanically: <CI required checks, branch protection, pre-commit hooks, permission deny rules>.\n- Not enforced (the agent must follow them by convention): <rules that rely on the agent's discipline>.\n- When a rule matters, move it from convention to an enforced check."
+  }
+ ]
+}
