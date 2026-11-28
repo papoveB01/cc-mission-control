@@ -6,12 +6,18 @@ A Claude Code plugin that opens a live local dashboard for your session. It show
 
 **Quick start:** in Claude Code run `/plugin marketplace add papoveB01/cc-mission-control`, then `/plugin install cc-mission-control@papoveb01`, then start a new session. The dashboard opens at http://127.0.0.1:4317/. Needs Python 3.10+ and [uv](https://docs.astral.sh/uv/) (see Requirements).
 
+**What's new in 0.13.0:**
+- **History and Reports on your own computer, from the first session.** The free edition now keeps every session in a local database, with nothing to install, sign in to or set up. History, Reports, Tasks, Errors, Efficiency and Usage are served at http://127.0.0.1:4317/history, next to Live. See "History on this computer". `CCMC_HISTORY=0` turns it off.
+- **Windows support.** The plugin runs on Windows as well as macOS and Linux. uv is now required on every system; it also supplies Python 3.10 or newer if the machine has none. Windows support is new: it passes the automated tests but has not yet had a full run on a real Windows PC, so please report any problem at https://github.com/papoveB01/cc-mission-control/issues.
+- **Remote hubs moved to the pro edition.** History from several computers, and viewing it from another machine, are pro features. `CCMC_UPSTREAM_URL` and `CCMC_UPSTREAM_TOKEN` are ignored by the free edition, and events that were still waiting to be sent to a remote hub are kept in `relay-remote-unsent/` in the data folder.
+- **Free and pro on one machine:** the free plugin never replaces a running pro server.
+
 **What's new in 0.12.0:**
 - **Complete session costs:** subagents that ran before the dashboard server saw a session now count in the session total (totals could be up to 58% low before).
 - **Correct context gauges:** each model gets its real context window from a table (1M for Fable/Mythos 5.x, Opus 5.5/5/4.8/4.7/4.6, Sonnet 5.5/5/4.6 and Haiku 5.5; 200K for older models), so a 1M model no longer shows "hot" at 180K.
 - **Fable 5.2 and Mythos 5.2 prices.** The price table is dated 2026-11-27.
 - **Every cost is marked as an estimate** ("~$1.64"). On a subscription, Live says "API-equivalent value, covered by your Max plan." The dashboard reads only the plan type from Claude Code's `.claude.json`; set `CCMC_PLAN_DETECT=0` to turn that off.
-- **Hub:** on first start the hub rebuilds and rescores its history in the background, which takes a few minutes. Ingest keeps working throughout.
+- **History:** on first start the local history process rebuilds and rescores its database in the background, which takes a few minutes. Recording keeps working throughout.
 
 **What's new in 0.11.1:**
 - **Dismiss:** the "needs you" banner and every attention-queue row on Live have a Dismiss button. It hides that occurrence only: a new wait, more errors, context getting hot again after a compaction, rising drift or a changed Mac alert brings it back. Dismissed items stay under **Dismissed (N)** with Restore, and counts elsewhere still include them. This browser remembers dismissals for 24 hours.
@@ -32,8 +38,8 @@ A Claude Code plugin that opens a live local dashboard for your session. It show
 - **Add to CLAUDE.md:** a missing rule's text can be added to the project's `CLAUDE.md` after a preview, with Undo. Nothing is committed. `CCMC_CONVENTION_RUBRIC` points at your own rubric file to replace or extend the built-in rules.
 
 **What's new in 0.8.0:**
-- **Side panel and menu:** the session tabs are in a panel on the left (`S` collapses it), and the header is a menu: Live, Reports, History and Settings. Reports and History open the hub.
-- **Settings:** display preferences in one place, plus a read-only view of the server and the hub connection.
+- **Side panel and menu:** the session tabs are in a panel on the left (`S` collapses it), and the header is a menu: Live, Reports, History and Settings. Reports and History open the local history pages.
+- **Settings:** display preferences in one place, plus a read-only view of the server and of local history.
 - **All-sessions graph:** the overview has a `[Sessions | Graph]` switch (`G`) that shows every active session with its subagents.
 - **Drift risk:** an estimate, from warning signs, that a session is losing track, with copyable `/compact` and handoff text. It does not detect hallucination, and nothing outside a session can run `/compact` for you.
 - **Fix:** the context color of the session tabs could stop updating, so a session passing 70% might not blink or move to the front.
@@ -95,9 +101,7 @@ More screenshots: [agent detail modal](docs/screenshot-modal.png), [command pale
 ## Requirements
 
 - Claude Code. Tested with 2.1.287; the minimum supported version has not been established. Background subagents (the default since 2.1.198) are handled.
-- Python 3.10 or newer, available on your PATH as `python3`.
-- [uv](https://docs.astral.sh/uv/) is recommended. On the first session the launcher uses uv to create the server's virtualenv in the plugin data directory (installing FastAPI and uvicorn), so there is nothing to install by hand and the environment survives plugin updates.
-- Without uv, the launcher still works if `fastapi` and `uvicorn` are importable by `python3`. The launcher only checks those two, but `websockets` and `httpx` are needed as well, so install all four: `pip install fastapi uvicorn websockets httpx`. If neither is true, it prints an install hint for uv to stderr and does nothing else; Claude Code is not affected.
+- [uv](https://docs.astral.sh/uv/) is required (macOS, Linux and Windows). The `SessionStart` hook runs the launcher through `uv`, which also supplies Python 3.10 or newer if the machine has none (the first session on such a machine may take longer while uv downloads one; after installing uv, run `uv python install 3.12` once, so the first session does not risk the 20 s `SessionStart` timeout on a slow connection), and creates the server's virtualenv in the plugin data directory (installing FastAPI and uvicorn). The old fallback of a bare `python3` with `fastapi` installed is no longer supported. Without uv on the PATH the hook does nothing and Claude Code is not affected.
 
 You do not need Node. The dashboard is prebuilt and committed to the repository.
 
@@ -148,13 +152,17 @@ Two caveats:
 
 ### What happens on first start
 
-When a session starts, the `SessionStart` hook runs `scripts/launch.py`. It starts the server if one is not already running (or replaces a running one that is older than the plugin, after confirming through `server.pid` and `ps` that it is a cc_mission_control process; on Windows the old server is kept), sends it the start event, and opens `http://127.0.0.1:4317/` in your browser. The first run can take a few seconds while uv builds the environment; later starts take milliseconds. The browser opens once: further sessions appear as tabs in the open dashboard, and the browser is not opened on `/clear` or compaction restarts.
+When a session starts, the `SessionStart` hook runs `scripts/launch.py`. It starts the server if one is not already running (or replaces a running one that is older than the plugin, after confirming through `server.pid` and `ps` that it is a cc_mission_control process; on servers that offer the control channel, through it on every platform), sends it the start event, and opens `http://127.0.0.1:4317/` in your browser. The first run can take a few seconds while uv builds the environment; later starts take milliseconds. The browser opens once: further sessions appear as tabs in the open dashboard, and the browser is not opened on `/clear` or compaction restarts.
 
 If no browser opens (remote or SSH session, `CCMC_NO_BROWSER=1`, `CLAUDE_CODE_REMOTE=true`, or no `open`/`xdg-open`), go to http://127.0.0.1:4317/ yourself.
 
 The first start downloads dependencies, so it needs network access. If the dashboard does not appear, wait a minute, start a new session, and check `server.log` in the data directory (`~/.claude/plugins/data/cc-mission-control-papoveb01/`).
 
 The server logs to `server.log` in the plugin data directory (`~/.claude/plugins/data/cc-mission-control-papoveb01/` for a plugin install; `~/.cc-mission-control/` if the launcher runs outside Claude Code). It exits by itself after 30 minutes with no active session and no open dashboard.
+
+### Troubleshooting
+
+**Claude Code shows a SessionStart hook error and the dashboard never opens.** `uv` is not installed or is not on your PATH (the hook runs `uv` directly). Install uv from https://docs.astral.sh/uv/, then start a new session.
 
 ### Disable or uninstall
 
@@ -188,10 +196,10 @@ The layout follows the width of the main area, not the window, because the side 
 
 ### Menu and settings
 
-- **Live** is the dashboard. **Reports** and **History** open the hub's pages (same tab) once the server knows the hub's address, which it takes from `CCMC_UPSTREAM_URL`. Without a hub they open a short note (`#/hub`) that names `CCMC_UPSTREAM_URL` and `CCMC_UPSTREAM_TOKEN` and points to `deploy/hub/`.
-- **Settings** (`#/settings`) holds display preferences that apply at once and are saved in your browser: activity wording, activity scope, the session view, the All sessions view, the side panel and the timeline, with a Reset to defaults button. Below them it shows the hub connection (not configured, connected, waiting for the first delivery, or not reachable, with the records queued, spooled size, records dropped and last delivery) and the server's settings, each with the environment variable that sets it. The server's settings are read-only: change the variable and restart the server. Secrets such as the hub token and the summary key are never shown.
+- **Live** is the dashboard. **Reports** and **History** open the local history pages at `/history` (same tab, same address as Live). With `CCMC_HISTORY=0` they open a short note (`#/hub`) that says how to turn history back on.
+- **Settings** (`#/settings`) holds display preferences that apply at once and are saved in your browser: activity wording, activity scope, the session view, the All sessions view, the side panel and the timeline, with a Reset to defaults button. Below them it shows History (whether it is recording, where the database is, its size, the oldest session and how long history is kept) and the server's settings, each with the environment variable that sets it. The server's settings are read-only: change the variable and restart the server. Secrets such as the summary key are never shown.
 - The browser's Back and Forward buttons work between the pages. Choosing a session or All sessions from Settings takes you back to Live. The palette and `s` still work on the Settings page; `g`, `t`, `f` and `e` do nothing there.
-- The history pages carry the same menu (Live, Reports, History, File lookup). Live goes to `http://127.0.0.1:4317/`.
+- The history pages carry the same menu (Live, Reports, History, File lookup). Live goes back to `/` on the same address.
 
 ### Sessions and side panel
 
@@ -311,7 +319,7 @@ Press Ctrl+K (Cmd+K on macOS) or use the Search button. Type to fuzzy-search ses
 
 ### Keyboard shortcuts
 
-Single-key shortcuts are ignored while you are typing in an input or while Ctrl, Cmd or Alt is held. On the All sessions view only Ctrl/Cmd+K, `?`, `[` / `]`, `g`, `s` and Esc apply. On the Settings and hub pages only Ctrl/Cmd+K, `?`, `[` / `]`, `s` and Esc apply.
+Single-key shortcuts are ignored while you are typing in an input or while Ctrl, Cmd or Alt is held. On the All sessions view only Ctrl/Cmd+K, `?`, `[` / `]`, `g`, `s` and Esc apply. On the Settings and history-off pages only Ctrl/Cmd+K, `?`, `[` / `]`, `s` and Esc apply.
 
 | Key | Action |
 |---|---|
@@ -349,14 +357,16 @@ All settings are environment variables, read when the server starts.
 | `CCMC_MAX_FIELD_CHARS` | `4000` | Truncation length for captured inputs and outputs. |
 | `CCMC_REDACT_FILE` | unset | Path to a file of extra redaction regexes (see Security and privacy). |
 | `CCMC_NO_BROWSER` | unset | `1` = never open the browser automatically. |
-| `CCMC_UPSTREAM_URL` | unset | Forward redacted records to this URL as JSON arrays of v2 envelopes. Off by default; when unset, nothing is created or sent. Records are spooled to `<data dir>/relay/` and retried with backoff until the upstream accepts them. |
-| `CCMC_UPSTREAM_TOKEN` | unset | Bearer token sent to the upstream. |
-| `CCMC_SPOOL_MB` | `200` | Cap on the relay spool on disk. Past it, the oldest segments are deleted and counted as dropped (shown in `/health`). |
+| `CCMC_HISTORY` | `1` | `0` turns local history off: no history process, no database and no relay. Reports and History in the menu then show a note. |
+| `CCMC_HISTORY_PORT` | `4318` | First-choice port for the history process (loopback only). When it is busy, the process takes a free port the system picks. |
+| `CCMC_HISTORY_RETENTION_DAYS` | `0` | Delete sessions whose last event is older than this many days. `0` keeps history forever. |
+| `CCMC_HISTORY_BACKUPS` | `3` | Daily backups of the history database kept in `<data dir>/history/backups/`. |
+| `CCMC_SPOOL_MB` | `200` | Cap on the relay spool on disk (`<data dir>/relay/`), which holds records until the history process has them. Past it, the oldest segments are deleted and counted as dropped (shown in `/health`). |
 | `CCMC_SUMMARIES` | unset | `1` = AI summaries of each turn and subagent (see AI summaries). Also needs the key file. |
 | `CCMC_SUMMARY_KEY_FILE` | `<data dir>/summary_api_key` | File holding the Anthropic API key for summaries. Ignored, with a log line, unless it is a regular file with no group or other permissions (mode 0600). |
 | `CCMC_SUMMARY_MODEL` | `claude-haiku-5-5` | Model used for summaries. |
 | `CCMC_SUMMARY_MAX_PER_HOUR` | `30` | Rate cap per rolling hour. Excess requests are skipped and counted in `/health`. |
-| `CCMC_PRICING_FILE` | unset | JSON file that replaces the built-in API price table used for cost estimates (see Token usage and cost). Also read by the hub. |
+| `CCMC_PRICING_FILE` | unset | JSON file that replaces the built-in API price table used for cost estimates (see Token usage and cost). Also read by the history process. |
 | `CCMC_PLAN_DETECT` | `1` | `0` = do not read the plan type from `.claude.json` (see Token usage and cost). |
 | `CCMC_CONVENTION_RUBRIC` | unset | Path to your own JSON rubric for the Conventions review (`{"version": 1, "extends": "builtin" or null, "disable": [ids], "rules": [...]}`). Regexes are capped at 300 characters, at most 60 rules. A rule may take its suggested text from a Markdown heading with `suggest_from: {file, heading}` (file relative to the rubric's folder). An unreadable or invalid file falls back to the built-in rubric, and Settings shows why. |
 | `CCMC_DEV_ORIGINS` | unset | Comma-separated extra allowed `Origin` values, for the Vite dev server only (for example `http://localhost:5173`). |
@@ -380,12 +390,19 @@ Entries merge across settings files; once the key is defined, HTTP hooks that ma
 
 ### Windows
 
-`hooks.json` starts the launcher with `python3`, which often does not exist on Windows. Replace `"command": "python3"` with `python` or `py` in the `SessionStart` entry. Make the edit in a fork or a `claude --plugin-dir` clone, not under `~/.claude/plugins/cache/`, which plugin updates overwrite. This has not been tested on Windows by the author.
+Windows is supported (new in 0.13.0, not yet run in full on a real Windows PC; please report problems as GitHub issues) with these points:
+
+- **uv is required.** Install it from https://docs.astral.sh/uv/ and start a new session. The `SessionStart` hook uses Claude Code's exec form (`"command": "uv"` with an `args` list), so no shell or `python3` is involved on any platform.
+- **Upgrades replace the old server** through a token-gated shutdown request (`control.token` in the data directory), not signals. A server from before this change (0.11.0 and earlier) does not offer it; stop that one by hand once.
+- **System page:** CPU, memory, disk and the process list work. Swap, load average and memory pressure are not shown on Windows, and the server's own memory figure is blank.
+- **Summaries key file:** Windows has no group/other permission bits, so the mode check is skipped. Keep `summary_api_key` inside your user profile folder.
+- **The nudge is not available** (it needs a Unix socket).
+- The server binds `127.0.0.1` exclusively (`SO_EXCLUSIVEADDRUSE`), so another local process cannot share the port.
 
 ## Security and privacy
 
 - **Local only.** The server binds to `127.0.0.1` and never to other interfaces. It rejects requests whose `Host` header is not `127.0.0.1:<port>` or `localhost:<port>` (DNS rebinding), and rejects `/hook`, `/api/*` and `/ws` requests carrying a foreign `Origin`, so a web page you visit cannot inject events or read the stream.
-- **Nothing leaves your machine** unless you set `CCMC_UPSTREAM_URL`. When set, the server forwards each event, already redacted, with two added fields: `machine_id` (first 12 hex characters of the SHA-256 of the hostname) and `user` (OS username). The hook URLs never change; hooks always post to the local server, which relays.
+- **Nothing leaves your machine.** The server sends each event, already redacted, only to the history process on the same computer (`127.0.0.1`), with two added fields: `machine_id` (first 12 hex characters of the SHA-256 of the hostname) and `user` (OS username). `CCMC_UPSTREAM_URL` and `CCMC_UPSTREAM_TOKEN` are no longer read: sending history to a remote hub is a pro feature.
 - **Redaction is best effort.** Every captured string is redacted before it is stored, displayed or forwarded, then truncated. A secret in a format the patterns do not recognize will be visible in the dashboard on your machine. Built-in patterns cover: private key blocks, Anthropic keys (`sk-ant-`), generic `sk-` keys, GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`), Slack tokens (`xox[abprs]-`), AWS access key IDs (`AKIA` or `ASIA`), Google API keys, JWTs, Bearer tokens, and values following `api_key`, `secret_key`, `secret`, `token`, `password`, `passwd`, `pwd`, `access_key`, `client_secret` or `private_key` with `:` or `=` (the key is kept, the value masked; key names match case-insensitively and accept `-` or `_`, so `api-key` and `API_KEY` both count). Nested objects are walked, and dictionary keys are redacted too. Matches become `[redacted]`.
 - **Adding patterns.** Put one Python regular expression per line in a file and point `CCMC_REDACT_FILE` at it. Lines starting with `#` are comments, and invalid regexes are skipped (with a warning in the log). The whole match is replaced with `[redacted]`.
 
@@ -414,7 +431,7 @@ Claude Code ── SessionStart (command hook) ──► scripts/launch.py ─�
 
 ## AI summaries (optional)
 
-Off by default. When on, the dashboard adds a one or two sentence, past-tense summary at the end of each main turn (only if it had at least 3 activity rows) and when each subagent finishes. It appears in the Activity feed as a highlighted "Summary" block, in both Plain and Technical modes, and is relayed to the hub so history shows it too. The hub never calls the API.
+Off by default. When on, the dashboard adds a one or two sentence, past-tense summary at the end of each main turn (only if it had at least 3 activity rows) and when each subagent finishes. It appears in the Activity feed as a highlighted "Summary" block, in both Plain and Technical modes, and is recorded in local history too. The history process never calls the API.
 
 To enable it:
 
@@ -461,11 +478,11 @@ Every agent's tokens are counted from its transcript (`message.usage`): input, c
 }
 ```
 
-With the relay on, usage records go to the hub, which stores one row per API message (counts and ids only, no text) and keeps them after `CCMC_HUB_RETENTION_DAYS` removes the session. `GET /api/history/usage` returns totals and estimated cost over a time range, grouped by agent type, model, project, machine, session or day (`from` inclusive and `to` exclusive in epoch seconds, `group_by`, `tz` in minutes east of UTC, and `machine`, `project`, `agent_type` and `model` filters). After an upgrade the local server re-reads existing transcripts for counting but does not re-send usage it already relayed (`<data dir>/usage_relayed.json` remembers how far each file was sent).
+With history on, usage records go to the history process, which stores one row per API message (counts and ids only, no text) and keeps them after `CCMC_HISTORY_RETENTION_DAYS` removes the session. `GET /api/history/usage` (served by the history process through the local server) returns totals and estimated cost over a time range, grouped by agent type, model, project, machine, session or day (`from` inclusive and `to` exclusive in epoch seconds, `group_by`, `tz` in minutes east of UTC, and `machine`, `project`, `agent_type` and `model` filters). After an upgrade the local server re-reads existing transcripts for counting but does not re-send usage it already relayed (`<data dir>/usage_relayed.json` remembers how far each file was sent).
 
 ## Task and error report
 
-The hub's history UI has a **Tasks** page (`#/tasks`) and an **Errors** page (`#/errors`) covering every session, filterable by time range, machine, project and agent type. A session's page also has a **Tasks** tab. Nothing new is sent to the hub: the report is derived from the hook events it already has, so it also covers sessions recorded before this version (the hub fills them in on its next maintenance run).
+The history UI has a **Tasks** page (`#/tasks`) and an **Errors** page (`#/errors`) covering every session, filterable by time range, machine, project and agent type. A session's page also has a **Tasks** tab. Nothing new is recorded for it: the report is derived from the hook events history already has, so it also covers sessions recorded before this version (history fills them in on its next maintenance run).
 
 - **A task** is one unit of work by one agent: a main-agent turn (from your prompt to `Stop` or `StopFailure`) or a subagent run. It ends `ok`, `error`, or `incomplete` (a new prompt or the session end came first), or is still `running`. Its outcome is the AI summary if there is one, else the agent's last message, else a count of actions and errors.
 - **A failure** is a tool error, an interrupt, a permission denial, a call that was blocked or cancelled, or an API error that ended a turn.
@@ -473,7 +490,27 @@ The hub's history UI has a **Tasks** page (`#/tasks`) and an **Errors** page (`#
 - **Fixed-rate trend.** The Errors page charts the fixed rate per agent type by day or week (a bucket with nothing to rate is a gap, not zero), with a table view of the same numbers.
 - **Export CSV** on both pages downloads up to 10,000 rows for the current filters, with only the redacted summaries already stored (never full tool input or output). Cells that start with a formula character get a leading quote.
 
-API: `GET /api/history/tasks`, `/failures`, `/report/summary`, `/report/trend` and `/sessions/{machine}/{session}/tasks` (SPEC 13.7). Tokens and estimated cost per task come from the usage records inside the task's window (see Token usage and cost).
+API: `GET /api/history/tasks`, `/failures`, `/report/summary`, `/report/trend` and `/sessions/{machine}/{session}/tasks`. Tokens and estimated cost per task come from the usage records inside the task's window (see Token usage and cost).
+
+## History on this computer
+
+History is on by default. The server starts a small second process (`python -m cc_mission_control.hub --local`, same Python) that keeps every session in a SQLite database at `<data dir>/history/history.db`, so Reports, History, Tasks, Errors, Efficiency and Usage work from your first session with nothing to install or set up. On macOS and Linux the data dir is `~/.cc-mission-control` unless `CLAUDE_PLUGIN_DATA` or `CCMC_DATA_DIR` says otherwise; on Windows it is the same folder inside your user profile.
+
+```
+Claude Code -> local server (127.0.0.1:4317) -> redact -> disk spool -> history process (127.0.0.1:4318, SQLite) -> /history
+```
+
+- **One address.** The history pages are served by the local server at `http://127.0.0.1:4317/history`, so there is no sign-in and no second address to remember. The server forwards the history requests to the history process, which listens on `127.0.0.1` only and accepts only a random key that the server hands it at each start.
+- **What is captured**, per session and per agent: hook events (session start and end, prompts, tool calls with their inputs and results, subagents, compactions), token usage read from the transcripts, file reads, writes and edits indexed by path, and permission events. Everything is redacted before it is stored (see Security and privacy).
+- **Where things are.** The database, a daily backup (the last `CCMC_HISTORY_BACKUPS`, default 3) and `worker.log` are in `<data dir>/history/`. Settings shows the location, size, oldest session and retention.
+- **Retention.** History is kept forever unless you set `CCMC_HISTORY_RETENTION_DAYS`.
+- **Delete it.** For a plugin install the data dir is `~/.claude/plugins/data/cc-mission-control-papoveb01/` (on Windows, the same path inside your user profile). Close every Claude Code session and dashboard tab, and wait until the server has shut down (`CCMC_IDLE_MINUTES`, default 30). Then delete the `history` and `relay` folders in the data dir (and `relay-remote-unsent`, if you upgraded from a remote hub setup); the next session starts with an empty history. Uninstalling the plugin deletes the whole data dir, history included, unless you pass `--keep-data`.
+- **If it stops.** The history process runs at a lower priority so that rebuilds never slow Live. If it exits, the server restarts it after 1, 5, 30 and 120 seconds and stops trying after five exits in ten minutes. While it is down, Live shows a "History is not recording" alert with steps, and records wait in the spool. It also warns when less than 2 GiB of disk is free. It stops when the server stops, including after an idle shutdown.
+- **Turn it off** with `CCMC_HISTORY=0` (set it where Claude Code can see it, then start a new session): no history process, no database and no relay.
+- **Remote hubs.** History from several computers, and viewing it from another machine, are part of the pro edition. If you used a remote hub with 0.12 or earlier, `CCMC_UPSTREAM_URL` and `CCMC_UPSTREAM_TOKEN` are now ignored (the server logs one line and Settings says so), your earlier history stays on that hub, and this computer starts a new local history. Spool files left from the old setup are moved once to `<data dir>/relay-remote-unsent/`.
+- **Windows.** The history process starts the same way (`python -m cc_mission_control.hub --local` from the same virtualenv), and the server stops it by its process id on exit.
+
+**Privacy.** Prompts and tool output are stored on your computer, in your user folder, after best-effort pattern redaction. Redaction cannot catch every secret, so treat the history folder like a transcript archive.
 
 ## Differences from the spec and Claude Code notes
 

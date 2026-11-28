@@ -36,8 +36,15 @@ class Config:
     max_field_chars: int = 4000
     redact_file: Path | None = None
     no_browser: bool = False
+    # The relay target. Not read from the environment since M55 (13.12): the server points it at the local history
+    # worker; the fields stay so tests can aim a relay at a fake receiver.
     upstream_url: str | None = None
     upstream_token: str | None = None
+    upstream_ignored: bool = False  # CCMC_UPSTREAM_URL or CCMC_UPSTREAM_TOKEN is set: a pro-edition setting (13.12)
+    history: bool = True  # CCMC_HISTORY=0 turns local history off: no worker, no database, no relay (13.12)
+    history_port: int = 4318  # CCMC_HISTORY_PORT; a busy port falls back to one the OS picks
+    history_retention_days: int = 0  # CCMC_HISTORY_RETENTION_DAYS; 0 = keep forever
+    history_backups: int = 3  # CCMC_HISTORY_BACKUPS: daily backups kept
     spool_mb: int = 200
     dev_origins: tuple[str, ...] = ()
     summaries: bool = False  # CCMC_SUMMARIES=1 (SPEC 11.6.2); the key itself is never kept in Config
@@ -71,8 +78,11 @@ class Config:
             max_field_chars=_int(env, "CCMC_MAX_FIELD_CHARS", 4000),
             redact_file=Path(redact_file).expanduser() if redact_file else None,
             no_browser=env.get("CCMC_NO_BROWSER", "").strip() == "1",
-            upstream_url=env.get("CCMC_UPSTREAM_URL", "").strip() or None,
-            upstream_token=env.get("CCMC_UPSTREAM_TOKEN", "").strip() or None,
+            upstream_ignored=bool(env.get("CCMC_UPSTREAM_URL", "").strip() or env.get("CCMC_UPSTREAM_TOKEN", "").strip()),
+            history=env.get("CCMC_HISTORY", "").strip() != "0",
+            history_port=_int(env, "CCMC_HISTORY_PORT", 4318),
+            history_retention_days=max(0, _int(env, "CCMC_HISTORY_RETENTION_DAYS", 0)),
+            history_backups=max(0, _int(env, "CCMC_HISTORY_BACKUPS", 3)),
             spool_mb=_int(env, "CCMC_SPOOL_MB", 200),
             dev_origins=tuple(o.strip().rstrip("/") for o in dev_origins.split(",") if o.strip()),
             summaries=env.get("CCMC_SUMMARIES", "").strip() == "1",
@@ -89,6 +99,7 @@ class Config:
 
 
 MIN_HUB_TOKEN = 32
+LOCAL_BINDS = ("127.0.0.1",)  # the only address the history worker may bind (SPEC 13.12)
 
 
 @dataclass(frozen=True)
@@ -104,6 +115,7 @@ class HubConfig:
     retention_days: int = 0
     backups: int = 7
     pricing_file: Path | None = None  # CCMC_PRICING_FILE (SPEC 13.6)
+    local: bool = False  # the free edition's history worker (13.12): loopback only, Bearer token only, no /login
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "HubConfig":
@@ -124,6 +136,8 @@ class HubConfig:
 
     def problem(self) -> str | None:
         """Why the hub must not start with this config, or None."""
+        if self.local and self.bind not in LOCAL_BINDS:
+            return f"--local binds {LOCAL_BINDS[0]} only (got {self.bind})"
         if not self.token:
             return "CCMC_HUB_TOKEN is not set; the hub refuses to start without a token"
         if len(self.token) < MIN_HUB_TOKEN:

@@ -130,8 +130,7 @@ def start_server(cfg: dict):
     """Spawn the detached server; returns the Popen, or None (with a stderr hint) if it can't."""
     built = build_command(cfg)
     if built is None:
-        log("needs uv: https://docs.astral.sh/uv/ (install it, then start a new session); "
-            "alternatively pip install fastapi uvicorn for python3")
+        log("needs uv: https://docs.astral.sh/uv/ (install it, then start a new session)")
         return None
     argv, env = built
     data_dir = cfg["data_dir"]
@@ -239,13 +238,66 @@ def wait_down(port: int, seconds: float) -> bool:
         time.sleep(POLL_SECONDS)
 
 
+def read_control_token(data_dir):
+    """The token in <data_dir>/control.token, or None. Never log it."""
+    try:
+        token = (Path(data_dir) / "control.token").read_text(encoding="ascii").strip()
+    except (OSError, ValueError):
+        return None
+    return token or None
+
+
+def post_shutdown(port: int, token: str) -> bool:
+    """POST /api/control/shutdown (no Origin header: only a non-browser client sends none). True on a 2xx."""
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/control/shutdown", data=b"",
+                                 headers={"X-CCMC-Control": token}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=1.0) as resp:
+            resp.read()
+        return True
+    except Exception as exc:  # noqa: BLE001  (the message never holds the token)
+        log(f"the control shutdown request failed: {exc}")
+        return False
+
+
+def is_free_server(data) -> bool:
+    """SPEC 13.12: only a server with no `edition`, or "edition": "free", may be replaced. A pro server never is."""
+    edition = data.get("edition") if isinstance(data, dict) else None
+    return edition is None or edition == "free"
+
+
+def replace_via_control(cfg: dict, mine):
+    """Stop an older server that advertises `control` (works on every platform).
+
+    None when the token file is unreadable (the caller falls back to signals); otherwise the fresh
+    (state, data) from /health after the attempt."""
+    port = cfg["port"]
+    token = read_control_token(cfg["data_dir"])
+    if token is None:
+        return None
+    state, now = health(port)  # another launcher may have replaced it already
+    if state != "ours" or not is_older(parse_version(now.get("version")), mine) or not is_free_server(now):
+        return state, now
+    log(f"replacing server {now.get('version')} with plugin version {'.'.join(map(str, mine))}")
+    if post_shutdown(port, token) and wait_down(port, REPLACE_TERM_WAIT_SECONDS):
+        return "down", None
+    log("the old server did not stop; reusing it")
+    return health(port)
+
+
 def replace_older(cfg: dict, data: dict):
     """SPEC 8.1 step 2a. None when nothing was signalled (reuse the server as is);
     otherwise the fresh (state, data) from /health after the attempt."""
     port = cfg["port"]
     mine, theirs = plugin_version(cfg["root"]), parse_version(data.get("version"))
+    if not is_free_server(data):
+        return None  # a pro server is never touched, whatever its version
     if not is_older(theirs, mine):
         return None
+    if data.get("control") is True:  # old servers do not advertise it; they take the paths below
+        result = replace_via_control(cfg, mine)
+        if result is not None:
+            return result
     if is_windows():
         log("the running server is older than the plugin; stop it manually to upgrade")
         return None
@@ -257,7 +309,7 @@ def replace_older(cfg: dict, data: dict):
         log(f"pid {pid} is not a cc_mission_control server; reusing the running one")
         return None
     state, now = health(port)  # another launcher may have replaced it already
-    if state != "ours" or not is_older(parse_version(now.get("version")), mine):
+    if state != "ours" or not is_older(parse_version(now.get("version")), mine) or not is_free_server(now):
         return None
     log(f"replacing server {data.get('version')} with plugin version {'.'.join(map(str, mine))}")
     sent = False

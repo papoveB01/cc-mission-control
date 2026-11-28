@@ -57,15 +57,18 @@ class SummaryRequest:
     result: str
 
 
-def key_problem(path: Path) -> Optional[str]:
-    """Why the key file cannot be used, or None. Never includes the key."""
+def key_problem(path: Path, *, windows: bool = os.name == "nt") -> Optional[str]:
+    """Why the key file cannot be used, or None. Never includes the key.
+
+    Windows reports every regular file as 0o666, so the mode-bit check is skipped there; the README
+    tells users to keep the key inside their profile folder (no ACL inspection)."""
     try:
         st = os.stat(path)
     except OSError:
         return "key file not found"
     if not stat.S_ISREG(st.st_mode):
         return "key file is not a regular file"
-    if st.st_mode & 0o077:
+    if not windows and st.st_mode & 0o077:
         return "key file must not be readable by group or others (chmod 600)"
     return None
 

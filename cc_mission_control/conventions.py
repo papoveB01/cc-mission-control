@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Collection, Optional, Sequence
 
-from .projects import canonical, same_path
+from .projects import canonical, is_fs_root, same_path
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +48,7 @@ CACHE_SECONDS = 30.0
 EVIDENCE_CHARS = 160
 LARGE_CLAUDE_CHARS = 40_000
 MAX_TARGET_BYTES = 1024 * 1024
+O_BINARY = getattr(os, "O_BINARY", 0)  # Windows: no newline translation on os.read / os.write
 MAX_SUGGESTION_CHARS = 8000
 MAX_REGEX_CHARS = 300
 MAX_RULES = 60
@@ -140,7 +141,8 @@ def _section(base_dir: Path, spec: Any, where: str) -> str:
     try:
         base_real = os.path.realpath(base_dir)
         target = os.path.realpath(os.path.join(base_real, rel))
-        if target != base_real and not target.startswith(base_real + os.sep):
+        # a filesystem-root base is accepted on purpose: everything under "/" is inside it (the old "//" prefix rejected all)
+        if target != base_real and not target.startswith(_with_sep(base_real)):
             raise fail  # the template must sit under the rubric's own folder
         st = os.stat(target)
         if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_RUBRIC_BYTES:
@@ -390,16 +392,26 @@ def evaluate(rules: Sequence[Rule], sources: Sequence[Any], na: Collection[str] 
 # ---------------------------------------------------------------- discovery
 
 
-def _inside(real: str, root_real: str) -> bool:
+def _with_sep(root: str, pathmod=os.path) -> str:
+    """`root` ending in exactly one separator; a root such as `/` or `C:\\` already has it."""
+    return root if root.endswith(pathmod.sep) else root + pathmod.sep
+
+
+def _inside(real: str, root_real: str, pathmod=os.path, same: Callable[[str, str], bool] = same_path) -> bool:
     """True when `real` is the root or lies under it. Compared by identity, so case differences do not matter."""
-    root = root_real.rstrip(os.sep)
-    if real == root_real or real.startswith(root + os.sep):
+    sep = pathmod.sep
+    base = _with_sep(root_real, pathmod)
+    if real == root_real or real.startswith(base):
         return True
-    rc, bc = real.casefold(), root.casefold()
-    if rc != bc and not rc.startswith(bc + os.sep):
+    rc, bc = real.casefold(), base.casefold()
+    if rc != root_real.casefold() and not rc.startswith(bc):
         return False
-    prefix = os.sep.join(real.split(os.sep)[:len(root.split(os.sep))])
-    return same_path(prefix, root_real)
+    # rebuild the root's prefix from `real`, keeping the drive / share anchor (a bare "C:" is drive-relative)
+    _, rrest = pathmod.splitdrive(root_real)
+    drive, rest = pathmod.splitdrive(real)
+    depth = len([c for c in rrest.split(sep) if c])
+    comps = [c for c in rest.split(sep) if c][:depth]
+    return same(drive + sep + sep.join(comps), root_real)
 
 
 def _classify(parts: tuple) -> Optional[str]:
@@ -448,7 +460,7 @@ def _discover(root_real: str, home_real: str) -> tuple:
     notes: list = []
     if not os.path.isdir(root_real):
         return found, notes
-    only_claude = root_real == os.sep or same_path(root_real, home_real)  # never walk a whole home folder or "/"
+    only_claude = is_fs_root(root_real) or same_path(root_real, home_real)  # never walk a whole home folder or "/"
     stack = [(root_real, (), 0)]
     visited = 0
     while stack:
@@ -523,7 +535,7 @@ def _read_regular(path: str, root_real: str, limit: int) -> tuple:
         real = os.path.realpath(path)
         if not _inside(real, root_real):
             return None, False
-        fd = os.open(real, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        fd = os.open(real, os.O_RDONLY | O_BINARY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except OSError:
         return None, False
     try:
@@ -797,7 +809,7 @@ def _check_target(root_real: str, path: str) -> tuple:
 def _write_private(path: Path, data: bytes, mode: int = 0o600) -> None:
     """temp + fsync + os.replace, so a crash never leaves half a state file."""
     tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY, 0o600)
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
@@ -816,7 +828,7 @@ def _write_private(path: Path, data: bytes, mode: int = 0o600) -> None:
 def _read_target(path: str) -> tuple:
     """(bytes, mode) of an existing target, or (None, None) when it is absent. Never follows a symlink."""
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        fd = os.open(path, os.O_RDONLY | O_BINARY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except FileNotFoundError:
         return None, None
     except OSError:
@@ -836,26 +848,47 @@ def _read_target(path: str) -> tuple:
         os.close(fd)
 
 
-def _replace_file(path: str, data: bytes, mode: int) -> None:
-    """Write beside the target, fsync, then os.replace; the mode is set explicitly."""
+def _unlink_tmp(tmp: str) -> None:
+    """Best-effort removal of the temp file; a read-only one (Windows) is made writable and retried."""
+    try:
+        os.unlink(tmp)
+    except PermissionError:
+        try:
+            os.chmod(tmp, stat.S_IWRITE)
+            os.unlink(tmp)
+        except OSError:
+            pass
+    except OSError:
+        pass
+
+
+def _replace_file(path: str, data: bytes, mode: int, windows: Optional[bool] = None) -> None:
+    """Write beside the target, fsync, then os.replace; the mode is set explicitly.
+
+    On Windows a read-only target cannot be replaced (WinError 5), so it is refused up front, before any temp file exists.
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    if windows and os.path.exists(path) and not os.access(path, os.W_OK):
+        raise ConventionError(409, "That file is read-only; clear the read-only attribute and try again")
     folder = os.path.dirname(path)
     tmp = os.path.join(folder, f".{os.path.basename(path)}.ccmc-{secrets.token_hex(6)}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         try:
             view = memoryview(data)
             while view:
                 view = view[os.write(fd, view):]
-            os.fchmod(fd, mode)
+            if hasattr(os, "fchmod"):  # absent on Windows before Python 3.13
+                os.fchmod(fd, mode)
             os.fsync(fd)
         finally:
             os.close(fd)
+        if not hasattr(os, "fchmod"):
+            os.chmod(tmp, mode)  # by name, after the close; Windows only honours the read-only bit
         os.replace(tmp, path)
     except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        _unlink_tmp(tmp)
         raise
     try:
         dfd = os.open(folder, os.O_RDONLY)
@@ -976,7 +1009,7 @@ class Conventions:
     # --- scanning
 
     def _unsafe_root(self, root_real: str) -> bool:
-        return root_real == os.sep or same_path(root_real, self.home)
+        return is_fs_root(root_real) or same_path(root_real, self.home)
 
     def _scan(self, root: str, force: bool = False) -> Scan:
         root_real = canonical(root)
@@ -1157,7 +1190,7 @@ class Conventions:
         for n in range(1, 1000):
             dest = folder / f"{key}-{stamp}-{n}.md"
             try:
-                fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY, 0o600)
             except FileExistsError:
                 continue
             with os.fdopen(fd, "wb") as fh:

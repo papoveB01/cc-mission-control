@@ -20,6 +20,27 @@ def _remove_pid(path, pid: int) -> None:
         pass
 
 
+def bind_socket(port: int, *, windows: bool = os.name == "nt", factory=socket.socket):
+    """A listening socket on 127.0.0.1:<port>; raises OSError when it cannot bind.
+
+    On Windows SO_REUSEADDR lets a second process bind the same address and port and receive hook
+    payloads, so Windows uses SO_EXCLUSIVEADDRUSE instead and never SO_REUSEADDR. POSIX keeps SO_REUSEADDR.
+    """
+    sock = factory(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if windows:
+            sock.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_EXCLUSIVEADDRUSE", ~socket.SO_REUSEADDR), 1)
+        else:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # host is fixed: the dashboard must never be reachable beyond loopback
+        sock.bind(("127.0.0.1", port))
+        sock.listen(128)
+    except OSError:
+        sock.close()
+        raise
+    return sock
+
+
 def _ws_impl() -> str:
     """The sans-io websockets protocol where uvicorn has it; the legacy one prints a deprecation warning."""
     from uvicorn.config import WS_PROTOCOLS
@@ -30,18 +51,13 @@ def _ws_impl() -> str:
 def main() -> int:
     import uvicorn
 
-    from .server import create_app
+    from .server import CONTROL_FILE, create_app
 
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     config = Config.from_env()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # host is fixed: the dashboard must never be reachable beyond loopback
-        sock.bind(("127.0.0.1", config.port))
-        sock.listen(128)
+        sock = bind_socket(config.port)
     except OSError as exc:
-        sock.close()
         log.error("cannot listen on 127.0.0.1:%d (%s); not starting", config.port, exc)
         return 1
     pid = os.getpid()
@@ -51,8 +67,11 @@ def main() -> int:
         pid_file.write_text(str(pid))
     except OSError as exc:
         log.error("cannot write %s (%s); continuing without a pid file", pid_file, exc)
+    from .history import HistorySupervisor
+
+    history = HistorySupervisor(config) if config.history else None  # SPEC 13.12: the local history worker
     try:
-        app = create_app(config)
+        app = create_app(config, control_path=config.data_dir / CONTROL_FILE, history=history)
         server = uvicorn.Server(
             uvicorn.Config(app, host="127.0.0.1", port=config.port, log_level="warning", ws=_ws_impl())
         )
@@ -65,6 +84,8 @@ def main() -> int:
         app.state.on_shutdown.append(lambda: _remove_pid(pid_file, pid))
         server.run(sockets=[sock])
     finally:
+        if history is not None:
+            history.stop_sync()  # the lifespan already stopped it; this covers a crash before or after it
         _remove_pid(pid_file, pid)
         sock.close()
     return 0

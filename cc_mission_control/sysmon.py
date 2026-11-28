@@ -1,7 +1,8 @@
 """System monitor (SPEC 11.16): host sampling in a worker thread plus Mission Control's own server metrics.
 
 Standard library only. On macOS the host is read with `sysctl`, `vm_stat` and `ps` (argument lists, 2 s timeout, never a
-shell); on Linux with /proc and `os.statvfs`; elsewhere every metric is null. The parsing functions are pure.
+shell); on Linux with /proc and `os.statvfs`; on Windows with ctypes calls into kernel32 (no extra dependency) and
+`shutil.disk_usage`; elsewhere every metric is null. The parsing functions are pure.
 Process names are the basename of the command only (never its arguments), redacted, then cut to 64 characters.
 """
 
@@ -10,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -190,9 +192,17 @@ def parse_proc_pid_stat(text: str) -> Optional[dict]:
     return {"pid": pid, "comm": text[lo + 1:hi], "ppid": ppid, "ticks": utime + stime, "rss_pages": max(0, rss)}
 
 
-def proc_name(comm: str, redact: Callable[[str], str]) -> str:
-    """Basename of the command only, redacted first and then cut to NAME_MAX. Arguments never get here."""
-    base = comm.rstrip("/").rsplit("/", 1)[-1].strip() or "?"
+def proc_name(comm: str, redact: Callable[[str], str], windows: bool = False) -> str:
+    """Basename of the command only, redacted first and then cut to NAME_MAX. Arguments never get here.
+
+    On Windows a trailing `.exe` is dropped (any case) and the name is lower-cased, so `Claude.EXE` is `claude`."""
+    if windows:
+        base = re.split(r"[\\/]", comm.rstrip("/\\"))[-1].strip() or "?"
+        if base.lower().endswith(".exe") and len(base) > 4:
+            base = base[:-4]
+        base = base.lower()
+    else:
+        base = comm.rstrip("/").rsplit("/", 1)[-1].strip() or "?"
     return redact(base)[:NAME_MAX]
 
 
@@ -286,6 +296,142 @@ def percentile(values: List[float], q: float) -> Optional[float]:
     return s[min(len(s) - 1, max(0, int(round(q * (len(s) - 1)))))]
 
 
+# ---- Windows API (ctypes only) -----------------------------------------------------------------------------------
+
+
+def _filetime(ft: Any) -> int:
+    return (ft.dwHighDateTime << 32) | ft.dwLowDateTime
+
+
+class _WinApi:
+    """The OS calls the Windows sampler needs, through ctypes and kernel32. Built only on Windows.
+
+    Every failure gives None for that value; handles are always closed. Interface (what tests fake):
+    system_times() -> (idle, kernel, user) in 100 ns ticks (kernel includes idle) | None
+    memory() -> {total_phys, avail_phys, total_page, avail_page} | None
+    processes() -> [(pid, ppid, exe_name)] | None
+    process_info(pid) -> (cpu_100ns_total, working_set_bytes) | None when the process cannot be opened
+    """
+
+    TH32CS_SNAPPROCESS = 0x2
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes as wt
+
+        self.ct = ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.k32 = k32
+        ulonglong, sizet = ctypes.c_ulonglong, ctypes.c_size_t
+
+        class FILETIME(ctypes.Structure):
+            _fields_ = [("dwLowDateTime", wt.DWORD), ("dwHighDateTime", wt.DWORD)]
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [("dwLength", wt.DWORD), ("dwMemoryLoad", wt.DWORD), ("ullTotalPhys", ulonglong),
+                        ("ullAvailPhys", ulonglong), ("ullTotalPageFile", ulonglong), ("ullAvailPageFile", ulonglong),
+                        ("ullTotalVirtual", ulonglong), ("ullAvailVirtual", ulonglong),
+                        ("ullAvailExtendedVirtual", ulonglong)]
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [("dwSize", wt.DWORD), ("cntUsage", wt.DWORD), ("th32ProcessID", wt.DWORD),
+                        ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wt.DWORD), ("cntThreads", wt.DWORD),
+                        ("th32ParentProcessID", wt.DWORD), ("pcPriClassBase", wt.LONG), ("dwFlags", wt.DWORD),
+                        ("szExeFile", ctypes.c_wchar * 260)]
+
+        class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+            _fields_ = [("cb", wt.DWORD), ("PageFaultCount", wt.DWORD), ("PeakWorkingSetSize", sizet),
+                        ("WorkingSetSize", sizet), ("QuotaPeakPagedPoolUsage", sizet), ("QuotaPagedPoolUsage", sizet),
+                        ("QuotaPeakNonPagedPoolUsage", sizet), ("QuotaNonPagedPoolUsage", sizet),
+                        ("PagefileUsage", sizet), ("PeakPagefileUsage", sizet)]
+
+        self.FILETIME, self.MEMORYSTATUSEX = FILETIME, MEMORYSTATUSEX
+        self.PROCESSENTRY32W, self.PROCESS_MEMORY_COUNTERS = PROCESSENTRY32W, PROCESS_MEMORY_COUNTERS
+        pf, pm, pe = ctypes.POINTER(FILETIME), ctypes.POINTER(MEMORYSTATUSEX), ctypes.POINTER(PROCESSENTRY32W)
+        k32.GetSystemTimes.argtypes, k32.GetSystemTimes.restype = [pf, pf, pf], wt.BOOL
+        k32.GlobalMemoryStatusEx.argtypes, k32.GlobalMemoryStatusEx.restype = [pm], wt.BOOL
+        k32.CreateToolhelp32Snapshot.argtypes, k32.CreateToolhelp32Snapshot.restype = [wt.DWORD, wt.DWORD], wt.HANDLE
+        k32.Process32FirstW.argtypes, k32.Process32FirstW.restype = [wt.HANDLE, pe], wt.BOOL
+        k32.Process32NextW.argtypes, k32.Process32NextW.restype = [wt.HANDLE, pe], wt.BOOL
+        k32.OpenProcess.argtypes, k32.OpenProcess.restype = [wt.DWORD, wt.BOOL, wt.DWORD], wt.HANDLE
+        k32.GetProcessTimes.argtypes = [wt.HANDLE, pf, pf, pf, pf]
+        k32.GetProcessTimes.restype = wt.BOOL
+        k32.K32GetProcessMemoryInfo.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESS_MEMORY_COUNTERS), wt.DWORD]
+        k32.K32GetProcessMemoryInfo.restype = wt.BOOL
+        k32.CloseHandle.argtypes, k32.CloseHandle.restype = [wt.HANDLE], wt.BOOL
+        self.invalid_handle = ctypes.c_void_p(-1).value
+
+    def system_times(self) -> Optional[Tuple[int, int, int]]:
+        try:
+            idle, kernel, user = self.FILETIME(), self.FILETIME(), self.FILETIME()
+            ref = self.ct.byref
+            if not self.k32.GetSystemTimes(ref(idle), ref(kernel), ref(user)):
+                return None
+            return _filetime(idle), _filetime(kernel), _filetime(user)
+        except Exception:
+            return None
+
+    def memory(self) -> Optional[dict]:
+        try:
+            m = self.MEMORYSTATUSEX()
+            m.dwLength = self.ct.sizeof(self.MEMORYSTATUSEX)
+            if not self.k32.GlobalMemoryStatusEx(self.ct.byref(m)):
+                return None
+            return {"total_phys": m.ullTotalPhys, "avail_phys": m.ullAvailPhys,
+                    "total_page": m.ullTotalPageFile, "avail_page": m.ullAvailPageFile}
+        except Exception:
+            return None
+
+    def processes(self) -> Optional[List[Tuple[int, int, str]]]:
+        try:
+            snap = self.k32.CreateToolhelp32Snapshot(self.TH32CS_SNAPPROCESS, 0)
+            if snap is None or snap == self.invalid_handle:
+                return None
+            out: List[Tuple[int, int, str]] = []
+            try:
+                entry = self.PROCESSENTRY32W()
+                entry.dwSize = self.ct.sizeof(self.PROCESSENTRY32W)
+                ok = self.k32.Process32FirstW(snap, self.ct.byref(entry))
+                while ok:
+                    out.append((int(entry.th32ProcessID), int(entry.th32ParentProcessID), entry.szExeFile))
+                    ok = self.k32.Process32NextW(snap, self.ct.byref(entry))
+            finally:
+                self.k32.CloseHandle(snap)
+            return out
+        except Exception:
+            return None
+
+    def process_info(self, pid: int) -> Optional[Tuple[int, int]]:
+        try:
+            handle = self.k32.OpenProcess(self.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return None
+            try:
+                ref = self.ct.byref
+                created, exited, kernel, user = self.FILETIME(), self.FILETIME(), self.FILETIME(), self.FILETIME()
+                if not self.k32.GetProcessTimes(handle, ref(created), ref(exited), ref(kernel), ref(user)):
+                    return None
+                counters = self.PROCESS_MEMORY_COUNTERS()
+                counters.cb = self.ct.sizeof(self.PROCESS_MEMORY_COUNTERS)
+                working_set = 0
+                if self.k32.K32GetProcessMemoryInfo(handle, ref(counters), counters.cb):
+                    working_set = int(counters.WorkingSetSize)
+                return _filetime(kernel) + _filetime(user), working_set
+            finally:
+                self.k32.CloseHandle(handle)
+        except Exception:
+            return None
+
+
+def _make_win_api() -> Any:
+    """The real _WinApi, or None when ctypes cannot load kernel32 (every Windows metric is then null)."""
+    try:
+        return _WinApi()
+    except Exception:
+        return None
+
+
 # ---- host sampler ----------------------------------------------------------------------------------------------
 
 
@@ -312,6 +458,8 @@ def _platform_kind(platform: str) -> str:
         return "darwin"
     if platform.startswith("linux"):
         return "linux"
+    if platform == "win32":
+        return "windows"
     return "other"
 
 
@@ -336,6 +484,8 @@ class Sampler:
         read: Callable[[Path], Optional[str]] = read_text,
         proc_root: Path = Path("/proc"),
         statvfs: Callable[[str], Any] = lambda p: os.statvfs(p),
+        disk_usage: Callable[[str], Any] = shutil.disk_usage,
+        win: Any = None,
         device: Callable[[str], Any] = lambda p: os.stat(p).st_dev,
         home: Optional[Path] = None,
         clock: Callable[[], float] = time.time,
@@ -345,6 +495,8 @@ class Sampler:
         self.redact = redact
         self.kind = _platform_kind(platform)
         self.run, self.read, self.proc_root, self.statvfs, self.device = run, read, proc_root, statvfs, device
+        self.disk_usage = disk_usage
+        self.win = win if win is not None or self.kind != "windows" else _make_win_api()
         self.home = home if home is not None else Path.home()
         self.clock = clock
         self.interval = interval
@@ -356,6 +508,8 @@ class Sampler:
         self._alerts: List[dict] = []
         self._prev_cpu: Optional[Tuple[int, int]] = None  # linux /proc/stat (busy, total)
         self._prev_ticks: Dict[int, Tuple[int, float]] = {}  # linux pid -> (ticks, time)
+        self._prev_win_cpu: Optional[Tuple[int, int]] = None  # windows (busy, total) in 100 ns ticks
+        self._prev_win_procs: Dict[Tuple[int, str], Tuple[int, float]] = {}  # windows (pid, exe) -> (cpu 100 ns total, time)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -386,6 +540,8 @@ class Sampler:
                 host, procs = self._sample_macos(now)
             elif self.kind == "linux":
                 host, procs = self._sample_linux(now)
+            elif self.kind == "windows":
+                host, procs = self._sample_windows(now)
             else:
                 host, procs = _null_host(self.kind), None
             if self.kind != "other":
@@ -411,7 +567,7 @@ class Sampler:
         if procs is None:
             return None
         for p in procs:
-            p["name"] = proc_name(p["comm"], self.redact)
+            p["name"] = proc_name(p["comm"], self.redact, self.kind == "windows")
         by_cpu, by_mem = top_processes(procs)
         return {"by_cpu": by_cpu, "by_mem": by_mem, "claude": claude_totals(procs)}
 
@@ -420,17 +576,21 @@ class Sampler:
         p = Path(path)
         for cand in (p, *p.parents):
             try:
-                st = self.statvfs(str(cand))
+                if self.kind == "windows":  # no os.statvfs there
+                    du = self.disk_usage(str(cand))
+                    free, total = int(du.free), int(du.total)
+                else:
+                    st = self.statvfs(str(cand))
+                    free, total = int(st.f_bavail * st.f_frsize), int(st.f_blocks * st.f_frsize)
             except (OSError, AttributeError, ValueError):
                 continue
-            total = int(st.f_blocks * st.f_frsize)
             if total <= 0:
                 return None, None
             try:
                 dev = self.device(str(cand))
             except (OSError, ValueError):
                 dev = None
-            return {"free": int(st.f_bavail * st.f_frsize), "total": total}, dev
+            return {"free": free, "total": total}, dev
         return None, None
 
     def _sample_macos(self, now: float) -> Tuple[dict, Optional[List[dict]]]:
@@ -516,6 +676,44 @@ class Sampler:
         self._prev_ticks = ticks
         return procs or None
 
+    def _sample_windows(self, now: float) -> Tuple[dict, Optional[List[dict]]]:
+        host = _null_host("windows")
+        win = self.win
+        if win is None:
+            return host, None
+        host["cores"] = os.cpu_count()
+        times = win.system_times()
+        if times is not None:
+            idle, kernel, user = times
+            total = kernel + user  # kernel time includes idle time
+            busy = total - idle
+            prev = self._prev_win_cpu
+            if prev is not None and total > prev[1]:
+                host["cpu_pct"] = round(max(0.0, min(100.0, (busy - prev[0]) / (total - prev[1]) * 100)), 1)
+                host["cpu_source"] = "GetSystemTimes"
+            self._prev_win_cpu = (busy, total)
+        mem = win.memory()
+        if mem:
+            host["mem_total"] = mem["total_phys"]
+            host["mem_used"] = max(0, mem["total_phys"] - mem["avail_phys"])
+        listing = win.processes()
+        procs: Optional[List[dict]] = None
+        if listing:
+            procs, seen = [], {}
+            for pid, ppid, exe in listing:
+                info = win.process_info(pid)
+                cpu, rss = 0.0, 0
+                if info is not None:
+                    cpu_total, rss = info
+                    seen[(pid, exe)] = (cpu_total, now)  # keyed on the exe too: a reused pid is a new process
+                    prev_p = self._prev_win_procs.get((pid, exe))
+                    if prev_p is not None and now > prev_p[1] and cpu_total >= prev_p[0]:
+                        # 100 ns ticks -> seconds; per core, so a busy multi-threaded process can exceed 100
+                        cpu = (cpu_total - prev_p[0]) / 1e7 / (now - prev_p[1]) * 100
+                procs.append({"pid": pid, "ppid": ppid, "cpu_pct": cpu, "rss_bytes": int(rss), "comm": exe})
+            self._prev_win_procs = seen
+        return host, procs
+
     # -- reading
     @property
     def has_sample(self) -> bool:
@@ -535,9 +733,14 @@ class Sampler:
 # ---- Mission Control's own server -------------------------------------------------------------------------------
 
 
-def own_rss_bytes(run: Runner = run_command, pid: Optional[int] = None) -> Optional[int]:
-    """Resident memory of this process: /proc on Linux, `ps -o rss= -p <pid>` on macOS, null elsewhere."""
+def own_rss_bytes(run: Runner = run_command, pid: Optional[int] = None, win: Any = None) -> Optional[int]:
+    """Resident memory of this process: /proc on Linux, `ps -o rss= -p <pid>` on macOS, the working set (the same
+    source as the per-process list) on Windows, null elsewhere. `win` is a _WinApi (tests pass a fake)."""
     pid = os.getpid() if pid is None else pid
+    if sys.platform == "win32":
+        api = win if win is not None else _make_win_api()
+        info = api.process_info(pid) if api is not None else None
+        return int(info[1]) if info is not None and info[1] > 0 else None
     if sys.platform.startswith("linux"):
         text = read_text(Path("/proc/self/statm"))
         bits = text.split() if text else []

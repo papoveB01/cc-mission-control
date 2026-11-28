@@ -34,6 +34,16 @@ def same_path(a: str, b: str) -> bool:
         return os.path.normpath(a) == os.path.normpath(b)
 
 
+def is_fs_root(path: str, pathmod=os.path) -> bool:
+    """True for a filesystem root: `/`, `C:\\` or a UNC share root. Never compare to `os.sep`: a drive root is not it."""
+    return pathmod.dirname(path) == path
+
+
+def _checkout_prefix(drive: str, parts: list, i: int, pathmod=os.path) -> str:
+    """The first `i` components of a path below its anchor `drive`, keeping the anchor: a bare `C:` is drive-relative."""
+    return drive + (pathmod.sep.join(parts[:i]) or pathmod.sep)
+
+
 def _fold(name: str) -> str:
     return unicodedata.normalize("NFC", name).casefold()
 
@@ -59,14 +69,21 @@ def _disk_name(parent: str, comp: str) -> str:
     return comp
 
 
+def _canonical_parts(real: str, pathmod, disk_name: Callable[[str, str], str]) -> str:
+    """Re-spell an already-resolved path component by component. The anchor (drive, UNC share or `/`) is split off
+    first: joining a bare drive such as `C:` with a name gives a drive-relative path on Windows (`C:Users`)."""
+    drive, rest = pathmod.splitdrive(real)
+    sep = pathmod.sep
+    cur = drive + sep
+    for comp in rest.split(sep):
+        if comp:
+            cur = pathmod.join(cur, disk_name(cur, comp))
+    return cur
+
+
 def canonical(path: str) -> str:
     """`realpath` with each component in the case it has on disk, so one folder always has one spelling."""
-    real = os.path.realpath(path)
-    cur = os.sep
-    for comp in real.split(os.sep):
-        if comp:
-            cur = os.path.join(cur, _disk_name(cur, comp))
-    return cur
+    return _canonical_parts(os.path.realpath(path), os.path, _disk_name)
 
 
 def project_key(root: str) -> str:
@@ -109,11 +126,12 @@ def _main_checkout(folder: str, home: str) -> Optional[str]:
     if not os.path.isabs(gitdir):
         gitdir = os.path.join(folder, gitdir)
     gitdir = os.path.normpath(gitdir)
-    parts = gitdir.split(os.sep)
+    drive, rest = os.path.splitdrive(gitdir)
+    parts = rest.split(os.sep)
     for i in range(len(parts) - 1):
         if parts[i] == ".git" and parts[i + 1] == "worktrees":
-            main = canonical(os.sep.join(parts[:i]) or os.sep)
-            if main == os.sep or same_path(main, home) or not os.path.isdir(os.path.join(main, ".git")):
+            main = canonical(_checkout_prefix(drive, parts, i))
+            if is_fs_root(main) or same_path(main, home) or not os.path.isdir(os.path.join(main, ".git")):
                 return None
             try:  # the main checkout must agree that this folder is one of its worktrees
                 with open(os.path.join(gitdir, "gitdir"), "rb") as fh:

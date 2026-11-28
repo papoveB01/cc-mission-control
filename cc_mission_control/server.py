@@ -4,17 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import logging
 import os
+import posixpath
+import re
+import secrets
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 from . import APP_ID, __version__
 from .config import Config
@@ -22,6 +27,8 @@ from . import nudge as nudge_mod
 from .efficiency_live import LiveEfficiency
 from .conventions import ConventionError, Conventions, load_rubric
 from .projects import Projects, project_key
+from .hub.db import db_size
+from .history import HistorySupervisor, history_dir, set_aside_remote_spool
 from .relay import RELAY_MAX, Relay, machine_id, os_user  # noqa: F401
 from .series import LiveSeries
 from .state import SUMMARIZER, Store
@@ -33,11 +40,70 @@ from .transcript import TranscriptWatcher
 log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+HISTORY_STATIC_DIR = Path(__file__).parent / "hub" / "static"  # the history UI bundle, served at /history (SPEC 13.12)
+HISTORY_MAX_RESPONSE = 32 * 1024 * 1024
+HISTORY_TIMEOUT = 30.0
+HISTORY_HEALTH_TIMEOUT = 1.5
+HISTORY_SECURITY = {
+    "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+# Only these cross the proxy. Cookie, Authorization, Origin and Referer never do.
+HISTORY_REQUEST_HEADERS = ("accept", "accept-language", "content-type")
+HISTORY_RESPONSE_HEADERS = ("content-type", "content-disposition", "cache-control", "x-truncated", "truncated", "retry-after")
+HISTORY_METHODS = ["GET", "HEAD"]  # the history UI only reads; anything else is a 405
+# Dot segments, doubled or backslash separators and encoded dots or separators never go to the worker.
+HISTORY_BAD_PATH = re.compile(r"\.\.|//|\\|%2e|%2f|%5c", re.IGNORECASE)
+HISTORY_PREFIX = "/api/history/"
+
+
+def history_path_ok(raw: str) -> bool:
+    """True when a proxied path is safe to forward: no `..`, `//`, backslash or encoded dot or separator in its
+    raw or percent-decoded forms (decoded twice), and it still starts with /api/history/ once normalised."""
+    forms = [raw]
+    for _ in range(2):
+        forms.append(unquote(forms[-1]))
+    if any(HISTORY_BAD_PATH.search(f) for f in forms):
+        return False
+    return all(posixpath.normpath(f).startswith(HISTORY_PREFIX.rstrip("/") + "/") or f == HISTORY_PREFIX for f in forms) and raw.startswith(HISTORY_PREFIX)
+
+LOCAL_RELAY_OPTIONS = {"seal_age": 1.5, "send_interval": 1.0, "backoff_max": 30.0}
 NO_CACHE = {"Cache-Control": "no-cache"}
 NO_STORE = {"Cache-Control": "no-store"}
 MAX_CONV_BODY = 4 * 1024  # SPEC 11.14: write requests carry a small JSON body
 PROJECT_KEY_TTL = 60.0
 IMMUTABLE = "public, max-age=31536000, immutable"
+CONTROL_FILE = "control.token"
+CONTROL_HEADER = "x-ccmc-control"
+O_BINARY = getattr(os, "O_BINARY", 0)  # Windows: no newline translation on os.read / os.write
+
+
+def write_control_token(path: Path, token: str) -> bool:
+    """Atomically write the control token with mode 0600 (SPEC 8.1). False when the file cannot be written."""
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY, 0o600)
+        try:
+            os.write(fd, token.encode("ascii"))
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        return False
+
+
+def remove_control_token(path: Path, token: str) -> None:
+    """Delete the token file only while it still holds our token (a newer server may have replaced it)."""
+    try:
+        if path.read_text(encoding="ascii").strip() == token:
+            path.unlink()
+    except (OSError, ValueError):
+        pass
 
 
 class ImmutableStaticFiles(StaticFiles):
@@ -48,6 +114,15 @@ class ImmutableStaticFiles(StaticFiles):
         if response.status_code == 200:
             response.headers["Cache-Control"] = IMMUTABLE
         return response
+class HistoryStaticFiles(ImmutableStaticFiles):
+    """The history bundle's hashed files: cached for good, with the page's security headers."""
+
+    async def get_response(self, path: str, scope: Any) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers.update(HISTORY_SECURITY)
+        return response
+
+
 BROADCAST_INTERVAL = 0.15
 HOUSEKEEPING_INTERVAL = 30.0
 EFFICIENCY_INTERVAL = 30.0
@@ -166,13 +241,27 @@ def create_app(
     summary_options: dict | None = None,
     home: Any = None,
     sysmon: Sampler | None = None,
+    control_path: Path | None = None,
+    history: HistorySupervisor | None = None,
+    history_client_factory: Callable[[], Any] | None = None,
 ) -> FastAPI:
+    """`control_path`: where the lifespan writes the launcher's shutdown token (None = in memory only, as in tests).
+
+    `history`: the supervisor of the local history worker (SPEC 13.12). The relay feeds it; the proxy at
+    /api/history/* talks to it. Only the entry point passes one, so tests never start a worker."""
     store = store or Store(config, clock=clock)
-    relay = (
-        Relay(config, store.redactor, relay_maxsize, clock=clock, **(relay_options or {}))
-        if config.upstream_url
-        else None
-    )
+    if config.upstream_ignored:
+        log.info("CCMC_UPSTREAM_URL and CCMC_UPSTREAM_TOKEN are ignored: sending history to a remote hub is a pro feature")
+    relay = None
+    if history is not None or config.upstream_url:
+        if history is not None:
+            set_aside_remote_spool(config.data_dir)
+        relay = Relay(config, store.redactor, relay_maxsize, clock=clock,
+                      **({**LOCAL_RELAY_OPTIONS, **(relay_options or {})} if history is not None else (relay_options or {})))
+        if history is not None:
+            history.on_target = lambda base, token: relay.set_target(base + "/ingest" if base else None, token)
+            if history.base_url:
+                relay.set_target(history.base_url + "/ingest", history.token)
     watcher = watcher or TranscriptWatcher(store)
     if relay is not None and watcher.emit is None:
         watcher.emit = relay.emit
@@ -188,6 +277,17 @@ def create_app(
         config, store, clock=clock, hub_url=hub_origin(config.upstream_url),
         hub_token=config.upstream_token, client_factory=relay.client_factory if relay is not None else None,
     )
+    if history is not None:  # Live's baseline comes from the worker, and follows its port (13.12)
+        previous = history.on_target
+
+        def follow(base, token):
+            if previous is not None:
+                previous(base, token)
+            live_eff.hub_url, live_eff.hub_token = base, token
+
+        history.on_target = follow
+        if history.base_url:
+            live_eff.hub_url, live_eff.hub_token = history.base_url, history.token
     live_eff.attach()  # observe usage and context updates (13.10); hooks are fed from /hook
 
     summarizer = Summarizer.from_config(config, store.redactor, clock=clock, **(summary_options or {}))
@@ -210,9 +310,13 @@ def create_app(
 
         summarizer.deliver = deliver
 
+    control_token = secrets.token_hex(32)  # never logged, never in /health or /api/settings
+
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         tasks: list[asyncio.Task] = []
+        if control_path is not None and not write_control_token(control_path, control_token):
+            log.warning("cannot write %s; the launcher cannot stop this server on upgrade", control_path)
         if start_loops:
             tasks.append(asyncio.create_task(lag_sampler(app.state.metrics)))
             if app.state.sysmon is not None:
@@ -220,6 +324,8 @@ def create_app(
             tasks.append(asyncio.create_task(_forever(app.state.broadcast_tick, BROADCAST_INTERVAL)))
             tasks.append(asyncio.create_task(_forever(app.state.housekeeping_tick, HOUSEKEEPING_INTERVAL)))
             tasks.append(asyncio.create_task(_forever(lambda: asyncio.to_thread(live_eff.maintain), EFFICIENCY_INTERVAL)))
+            if history is not None:
+                history.start()
             if app.state.relay is not None:
                 tasks.append(asyncio.create_task(_relay_forever(lambda: live_eff.run_hub(asyncio.sleep))))
                 tasks.append(asyncio.create_task(_relay_forever(app.state.relay.run_writer)))
@@ -236,6 +342,15 @@ def create_app(
             for task in tasks:
                 with contextlib.suppress(BaseException):
                     await task
+            if history is not None:
+                try:
+                    await history.stop()  # by its recorded pid: SIGTERM, then SIGKILL after 3 s
+                except Exception:
+                    log.debug("history worker stop failed", exc_info=True)
+            client = state.history_client
+            if client is not None:
+                with contextlib.suppress(Exception):
+                    await client.aclose()
             if app.state.relay is not None:
                 try:
                     app.state.relay.flush_sync()
@@ -254,6 +369,8 @@ def create_app(
                     hook()
                 except Exception:
                     log.debug("shutdown hook failed", exc_info=True)
+            if control_path is not None:
+                remove_control_token(control_path, control_token)
 
     app = FastAPI(title=APP_ID, version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     state = app.state
@@ -262,6 +379,8 @@ def create_app(
     state.watcher = watcher
     state.clients = {}  # WebSocket -> Client
     state.relay = relay
+    state.history = history
+    state.history_client = None  # the proxy's httpx client, made on first use
     state.summarizer = summarizer
     state.metrics = metrics
     state.sysmon = sysmon
@@ -273,6 +392,7 @@ def create_app(
         clock=clock,
     )
     state.request_shutdown = lambda: None
+    state.control_token = control_token  # for tests; never serialised
     projects = Projects(home)
     state.projects = projects
     state.conventions = Conventions(
@@ -423,6 +543,7 @@ def create_app(
             "clients": len(state.clients),
             "sessions": len(snap),
             "active": sum(1 for s in snap if s.get("status") == "active"),
+            "control": True,  # POST /api/control/shutdown exists; the launcher reads control.token for it
         }
         if nudge_enabled():
             out["nudge"] = True  # the launcher sends the inbox token only to a server that says so
@@ -431,6 +552,17 @@ def create_app(
         if state.summarizer is not None:
             out["summaries"] = state.summarizer.stats()
         return out
+
+    @app.post("/api/control/shutdown")
+    async def control_shutdown(request: Request) -> Response:
+        """Launcher-only stop (SPEC 8.1): needs the token from control.token and no Origin (browsers always send one)."""
+        if "origin" in request.headers:
+            return Response(status_code=403)
+        sent = request.headers.get(CONTROL_HEADER, "")
+        if not sent or not hmac.compare_digest(sent.encode("utf-8"), control_token.encode("ascii")):
+            return Response(status_code=403)
+        log.info("shutdown requested through the control channel")
+        return Response(status_code=200, background=BackgroundTask(lambda: state.request_shutdown()))
 
     async def read_capped(request: Request) -> Optional[bytes]:
         """Request body, or None when it exceeds MAX_HOOK_BYTES (checked without buffering it all)."""
@@ -489,16 +621,43 @@ def create_app(
         warning = state.conventions.rubric.warning
         return f"custom, but ignored: {warning}" if warning else "custom"
 
+    def history_state() -> str:
+        if not config.history:
+            return "off"
+        return state.history.state if state.history is not None else "starting"
+
+    async def history_info() -> dict:
+        """Settings -> History (SPEC 13.12): where the database is, its size, the oldest session, the retention."""
+        db = history_dir(config) / "history.db"
+        info: dict = {
+            "enabled": config.history, "state": history_state(), "location": str(history_dir(config)), "db_bytes": None,
+            "oldest_session": None, "sessions": None, "retention_days": config.history_retention_days,
+            "backups": config.history_backups, "upstream_ignored": config.upstream_ignored,
+        }
+        if not config.history:
+            return info
+        with contextlib.suppress(OSError):
+            info["db_bytes"] = db_size(db)
+        target = history_target()
+        if target is not None:
+            try:
+                resp = await (await history_http()).get(
+                    target[0] + "/api/history/stats", headers={"Authorization": "Bearer " + target[1]},
+                    timeout=HISTORY_HEALTH_TIMEOUT)
+                body = resp.json() if resp.status_code == 200 else {}
+                if isinstance(body.get("oldest_started"), (int, float)):
+                    info["oldest_session"] = body["oldest_started"]
+                if isinstance(body.get("sessions"), int):
+                    info["sessions"] = body["sessions"]
+                if isinstance(body.get("db_bytes"), int):
+                    info["db_bytes"] = body["db_bytes"]
+            except Exception:
+                log.debug("history health failed", exc_info=True)
+        return info
+
     @app.get("/api/settings")
     async def settings() -> JSONResponse:
         """Read-only view of the running server for the Settings page (SPEC 11.13). Built from an explicit allowlist."""
-        origin = hub_origin(config.upstream_url)
-        hub = {"configured": False, "url": None, "history_url": None, "queued": 0, "spooled_bytes": 0, "dropped": 0, "last_ok": None, "state": "off"}
-        if state.relay is not None:
-            st = state.relay.stats()
-            hub.update(configured=True, url=origin, history_url=origin + "/history" if origin else None,
-                       queued=st["queued"], spooled_bytes=st["spooled_bytes"], dropped=st["dropped"], last_ok=st["last_ok"])
-            hub["state"] = "error" if st["last_error"] else ("ok" if st["last_ok"] is not None else "waiting")
         if state.summarizer is not None:
             summaries = "on"
         else:
@@ -519,10 +678,14 @@ def create_app(
             ("nudge", "CCMC_NUDGE", "Nudge", "on" if nudge_enabled() else "off"),
             ("convention_rubric", "CCMC_CONVENTION_RUBRIC", "Convention rubric", rubric_value()),
             ("sysmon", "CCMC_SYSMON", "System monitor", "on" if state.sysmon is not None else "off"),
+            ("history", "CCMC_HISTORY", "Local history", "on" if config.history else "off"),
+            ("history_port", "CCMC_HISTORY_PORT", "History port (first choice)", config.history_port),
+            ("history_retention_days", "CCMC_HISTORY_RETENTION_DAYS", "History kept (days, 0 = forever)", config.history_retention_days),
+            ("history_backups", "CCMC_HISTORY_BACKUPS", "History backups kept", config.history_backups),
         ]
         body = {
             "version": __version__,
-            "hub": hub,
+            "history": await history_info(),
             "server": [{"key": k, "env": e, "label": label, "value": v} for k, e, label, v in rows],
         }
         return JSONResponse(body, headers={"Cache-Control": "no-store"})
@@ -557,6 +720,8 @@ def create_app(
             transcripts=len(getattr(watcher, "_tails", {})), sessions=session_count(), relay=relay,
         )
         out["server"] = server
+        if config.history and state.history is not None:  # SPEC 13.12: history_down and history_disk_low
+            out["alerts"] = [*out.get("alerts", []), *await asyncio.to_thread(state.history.alerts)]
         return JSONResponse(out, headers=NO_STORE)
     @app.get("/api/efficiency/live")
     async def efficiency_live() -> JSONResponse:
@@ -756,6 +921,98 @@ def create_app(
             pass
         finally:
             drop(client, close=False)
+
+    # ---- local history (SPEC 13.12): one origin. The UI bundle is served here, the API is proxied to the worker.
+
+    def history_target() -> Optional[tuple]:
+        """(base url, token) of the running worker, or None."""
+        h = state.history
+        if h is None or not config.history:
+            return None
+        base, token = h.base_url, h.token
+        return (base, token) if base and token else None
+
+    async def history_http() -> Any:
+        if state.history_client is None:
+            if history_client_factory is not None:
+                state.history_client = history_client_factory()
+            else:
+                import httpx
+
+                # trust_env=False: a proxy variable in the environment must never capture loopback traffic
+                state.history_client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(HISTORY_TIMEOUT), follow_redirects=False, trust_env=False)
+        return state.history_client
+
+    def history_down() -> JSONResponse:
+        return JSONResponse({"error": "history_down"}, status_code=503, headers=NO_STORE)
+
+    @app.api_route("/api/history/{path:path}", methods=HISTORY_METHODS, include_in_schema=False)
+    async def history_proxy(path: str, request: Request) -> Response:
+        if not config.history:
+            return JSONResponse({"error": "history_off"}, status_code=404, headers=NO_STORE)
+        target = history_target()
+        if target is None:
+            return history_down()
+        base, token = target
+        raw = request.scope.get("raw_path")
+        raw_path = raw.decode("latin-1") if isinstance(raw, (bytes, bytearray)) else request.url.path
+        if not history_path_ok(raw_path) or not history_path_ok(request.url.path):
+            return JSONResponse({"error": "not_found"}, status_code=404, headers=NO_STORE)  # never forwarded
+        url = base + raw_path + (("?" + request.url.query) if request.url.query else "")
+        headers = {k: v for k, v in request.headers.items() if k.lower() in HISTORY_REQUEST_HEADERS}
+        headers["Authorization"] = "Bearer " + token
+        headers["Accept-Encoding"] = "identity"
+        client = await history_http()
+        import httpx
+
+        try:
+            req = client.build_request(request.method, url, headers=headers)
+            upstream = await asyncio.wait_for(client.send(req, stream=True), HISTORY_TIMEOUT)
+        except asyncio.TimeoutError:
+            return JSONResponse({"error": "history_timeout"}, status_code=504, headers=NO_STORE)
+        except (httpx.HTTPError, OSError):
+            return history_down()
+        if upstream.status_code == 401:  # the token is ours: a 401 can only mean the worker was replaced
+            await upstream.aclose()
+            return history_down()
+        declared = upstream.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > HISTORY_MAX_RESPONSE:
+            await upstream.aclose()
+            return JSONResponse({"error": "history_too_large"}, status_code=502, headers=NO_STORE)
+        out_headers = {k: v for k, v in upstream.headers.items() if k.lower() in HISTORY_RESPONSE_HEADERS}
+        out_headers.setdefault("Cache-Control", "no-store")
+        deadline = time.monotonic() + HISTORY_TIMEOUT
+
+        async def body():
+            total = 0
+            try:
+                async for chunk in upstream.aiter_raw():
+                    total += len(chunk)
+                    if total > HISTORY_MAX_RESPONSE or time.monotonic() > deadline:
+                        raise RuntimeError("history response cut off")  # the connection drops; no half-answer is served as whole
+                    yield chunk
+            finally:
+                await upstream.aclose()
+
+        return StreamingResponse(body(), status_code=upstream.status_code, headers=out_headers)
+
+    def history_page() -> Response:
+        if not config.history:
+            return RedirectResponse("/#/hub", status_code=307)
+        page = HISTORY_STATIC_DIR / "history.html"
+        if page.is_file():
+            html = page.read_text(encoding="utf-8")
+        else:
+            html = ("<!doctype html><meta charset=utf-8><title>History</title>"
+                    "<h1>History</h1><p>The history bundle is not built. Run <code>npm run build</code> in <code>ui/</code>.</p>")
+        return HTMLResponse(html, headers={**NO_CACHE, **HISTORY_SECURITY})
+
+    app.add_api_route("/history", history_page, methods=["GET"], include_in_schema=False)
+    app.add_api_route("/history/", history_page, methods=["GET"], include_in_schema=False)
+
+    if (HISTORY_STATIC_DIR / "assets").is_dir():
+        app.mount("/history/assets", HistoryStaticFiles(directory=HISTORY_STATIC_DIR / "assets"), name="history-assets")
 
     @app.get("/", include_in_schema=False)
     async def index() -> Response:

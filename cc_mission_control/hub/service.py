@@ -30,7 +30,7 @@ from ..describe import task_title
 from ..pricing import COUNT_FIELDS, UsageTotals, empty_usage, load_pricing
 from ..redact import Redactor, load_patterns
 from . import HUB_APP_ID
-from .db import open_db
+from .db import db_size, open_db
 from .ingest import Record, parse_envelope, usage_row
 from ..state import MAIN, _norm_agent
 from . import effstore, reports
@@ -481,12 +481,19 @@ class HubService:
             return fn(existing or state)
 
     def health(self) -> dict:
+        """Unauthenticated liveness: counts only (the oldest-session time is in stats(), behind the token)."""
         sessions = self.reader().execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         try:
-            size = os.path.getsize(self.cfg.db)
+            size = db_size(self.cfg.db)
         except OSError:
             size = 0
         return {"app": HUB_APP_ID, "version": __version__, "records": self._records, "sessions": sessions, "db_bytes": size}
+
+    def stats(self) -> dict:
+        """What Settings shows (13.12): session count, database size with its WAL files, the oldest session's start."""
+        out = self.health()
+        oldest = self.reader().execute("SELECT MIN(started) FROM sessions").fetchone()[0]
+        return {"sessions": out["sessions"], "db_bytes": out["db_bytes"], "oldest_started": oldest}
 
     def _usage_rows(
         self, conn: sqlite3.Connection, key_sql: str, join: str, where: str, args: list, source: Optional[str] = None,

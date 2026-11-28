@@ -2,8 +2,21 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
+
+
+def db_size(path) -> int:
+    """Bytes the database takes on disk: the file plus its -wal and -shm files when they exist."""
+    total = 0
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            total += os.path.getsize(str(path) + suffix)
+        except OSError:
+            if suffix == "":
+                raise
+    return total
 
 # One entry per schema version; index + 1 == PRAGMA user_version after applying it.
 MIGRATIONS = [

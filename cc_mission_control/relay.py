@@ -1,4 +1,7 @@
-"""Upstream relay v2 (SPEC section 13.1): envelopes, a disk spool and batched, retried sending.
+"""Relay v2 (SPEC section 13.1): envelopes, a disk spool and batched, retried sending.
+
+In the free edition (13.12) the target is the local history worker's `/ingest`, set by the server once the worker
+is up (`set_target`). Records spooled while there is no target, or while the worker is down, go out when it is back.
 
 Ingestion only appends to a bounded in-memory deque. A writer task moves records to
 append-only JSONL segments; a sender task posts closed segments to the hub and deletes
@@ -61,7 +64,8 @@ def os_user() -> str:
 def _default_client() -> Any:
     import httpx
 
-    return httpx.AsyncClient(timeout=RELAY_TIMEOUT)
+    # trust_env=False: HTTP_PROXY and friends must never carry the worker token or records off the machine (13.12)
+    return httpx.AsyncClient(timeout=RELAY_TIMEOUT, trust_env=False)
 
 
 class Relay:
@@ -135,6 +139,12 @@ class Relay:
             self._enforce_cap()
         except OSError as exc:
             log.warning("relay spool unavailable (%s)", type(exc).__name__)
+
+    def set_target(self, url: Optional[str], token: Optional[str]) -> None:
+        """Point the sender at an ingest URL (None while the receiver is down). A new target ends any backoff."""
+        self.url = url or ""
+        self.token = token
+        self.backoff = self.backoff_min
 
     def _drop(self, n: int) -> None:
         if n > 0:
@@ -403,6 +413,8 @@ class Relay:
 
     async def send_pending(self, client: Any) -> bool:
         """Send every spooled segment, oldest first. False on the first failure."""
+        if not self.url:  # no receiver yet (the worker is starting or down): keep everything in the spool
+            return False
         while True:
             path = await asyncio.to_thread(self._next_segment)
             if path is None:
@@ -421,6 +433,8 @@ class Relay:
                 if ok:
                     self.backoff = self.backoff_min
                     await self.sleep(self.send_interval)
+                elif not self.url:
+                    await self.sleep(self.send_interval)  # nothing to send to yet: not a failure, so no backoff
                 else:
                     await self.sleep(self.backoff)
                     self.backoff = min(self.backoff * 2, self.backoff_max)

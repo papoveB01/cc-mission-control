@@ -103,7 +103,7 @@ def create_app(
             if not auth.origin_allowed(origin, cfg.hosts, cfg.tailnet_hosts, host):
                 return JSONResponse({"detail": "forbidden origin"}, status_code=403)
         response = await call_next(request)
-        if path in ("/history", "/login") or path.startswith("/assets/"):
+        if path in ("/history", "/login") or path.startswith(("/assets/", "/history/assets/")):
             response.headers.update(SECURITY_HEADERS)
         return response
 
@@ -117,6 +117,8 @@ def create_app(
     def require_user(request: Request) -> None:
         if auth.bearer_ok(token, request.headers.get("authorization")):
             return
+        if cfg.local:  # the history worker (13.12) knows no cookie
+            raise unauthorized()
         if not auth.cookie_ok(token, request.cookies.get(auth.COOKIE_NAME)):
             raise unauthorized()
 
@@ -124,7 +126,6 @@ def create_app(
     def health() -> dict:
         return service.health()
 
-    @app.post("/login")
     async def login(request: Request) -> JSONResponse:
         now = time.monotonic()
         while failures and now - failures[0] > LOGIN_WINDOW:
@@ -145,6 +146,9 @@ def create_app(
             samesite="strict", secure=request.url.scheme == "https", path="/",
         )
         return response
+
+    if not cfg.local:  # /login and the session cookie are for the remote hub; the local worker takes a Bearer token only
+        app.post("/login")(login)
 
     @app.post("/ingest", dependencies=[Depends(require_bearer)])
     async def ingest(request: Request) -> dict:
@@ -476,9 +480,16 @@ def create_app(
         except BadCursor:
             raise HTTPException(400, "invalid cursor")
 
+    @app.get(f"{api}/stats", dependencies=guarded)
+    def stats() -> dict:
+        return service.stats()
+
     @app.get(f"{api}/machines", dependencies=guarded)
     def machines() -> dict:
         return {"machines": service.machines()}
+
+    if cfg.local:  # the local server serves the history UI itself, on one origin (13.12)
+        return app
 
     # The page and bundle carry no data, so they are served without a token; the login form lives there.
     @app.get("/history", response_class=HTMLResponse)
@@ -487,6 +498,7 @@ def create_app(
         html = page.read_text(encoding="utf-8") if page.is_file() else PLACEHOLDER
         return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
-    if (static_dir / "assets").is_dir():
+    if (static_dir / "assets").is_dir():  # the bundle is built with base /history/ (13.12); /assets/ keeps older pages working
+        app.mount("/history/assets", StaticFiles(directory=static_dir / "assets"), name="history-assets")
         app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
     return app
